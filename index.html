@@ -16,93 +16,128 @@
 
   <style>
     :root{
-      --bg:#10151f; --panel:#0f1b2e; --accent:#33e1ff; --good:#5CFF7A; --bad:#ff6b6b;
-      --text:#e9f0ff;
+      --bg:#0c1220; --panel:#0f1b2e; --panel-2:#0b1320;
+      --accent:#33e1ff; --good:#5CFF7A; --bad:#ff6b6b; --text:#e9f0ff;
+      --edge:#2c4166; --edge-2:#1e314f; --shadow:#070b13;
+      --runway:#2ce3ff; --runway-glow:#98f6ff;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
     body{
-      margin:0; background:#0c1220; color:var(--text);
+      margin:0; background: radial-gradient(1200px 800px at 30% -10%, #15243c, var(--bg));
+      color:var(--text);
       font-family:"Press Start 2P",system-ui,monospace; letter-spacing:.5px;
       display:flex; flex-direction:column; align-items:center;
     }
-    .frame{ width:min(100%, 980px); padding:12px }
-    .title{ text-align:center; font-size:clamp(16px,3vw,28px); margin:10px 0 6px; text-shadow:0 3px 0 #000 }
+    .frame{ width:min(100%, 980px); padding:16px }
+    .title{
+      text-align:center; font-size:clamp(18px,3.2vw,34px); margin:6px 0 10px;
+      text-shadow:0 3px 0 #000, 0 0 18px rgba(51,225,255,.25);
+      letter-spacing:2px;
+    }
 
-    /* —— SOFA (always-on portraits) ——————————————————— */
+    /* —— LOUNGE (always-on portraits) ——————————————————— */
     .sofa{
-      position:relative; height:160px; margin:8px 0 12px;
-      border:4px solid #0b1320; outline:2px solid #2c4166; border-radius:18px; overflow:hidden;
+      position:relative; height:172px; margin:4px 0 14px;
+      border:4px solid var(--panel-2); outline:2px solid var(--edge); border-radius:18px; overflow:hidden;
       background:
-        linear-gradient(#1c2c49,#13243f) padding-box,
+        linear-gradient(#1e2f4d,#142540) padding-box,
         repeating-linear-gradient(0deg,#0b1320 0 2px,#0f1b2e 2px 4px);
+      box-shadow:0 8px 0 var(--shadow), inset 0 0 0 2px #1f2d47;
     }
     .couch{
-      position:absolute; left:8px; right:8px; bottom:8px; height:70px; border-radius:14px;
-      background: linear-gradient(#6b431d,#4c2d12); border:3px solid #2e1a0b; box-shadow: inset 0 8px 0 #2c180a;
+      position:absolute; left:10px; right:10px; bottom:10px; height:78px; border-radius:16px;
+      background: linear-gradient(#7b4a1e,#5a3113); border:3px solid #2e1a0b;
+      box-shadow: inset 0 10px 0 #2c180a, 0 6px 0 rgba(0,0,0,.25);
     }
     .char{
-      position:absolute; bottom:56px; width:120px; height:120px; image-rendering:pixelated;
+      position:absolute; bottom:66px; width:120px; height:120px; image-rendering:pixelated;
       display:flex; align-items:flex-end; justify-content:center;
-      filter: drop-shadow(0 6px 0 #070b13);
+      filter: drop-shadow(0 6px 0 var(--shadow));
+      transform-origin: 50% 85%;
     }
-    .char.kessler{ left:48px }
-    .char.cajun{ right:48px }
-
+    .char.kessler{ left:56px }
+    .char.cajun{ right:56px }
     .sprite{
       width:96px; height:96px;
-      /* Critical: exact sheet size to prevent sub-pixel “shimmy” */
+      /* exact sheet size prevents sub-pixel shimmy */
       background-size:384px 96px;
       background-position:0 0;
       background-repeat:no-repeat;
       border:3px solid #1a2b4a; border-radius:10px; background-color:#132240;
       image-rendering: pixelated;
     }
-    /* Sprite-sheet animation using CSS steps; each sheet is 4 frames horizontally */
-    .animate-frames{ animation: play 0.8s steps(4) infinite }
-    @keyframes play { from{ background-position:0 0 } to{ background-position:-384px 0 } }
 
-    /* Reactions (used on win/lose only) */
-    .cheer{ animation: cheer .55s ease-in-out 6 }
-    @keyframes cheer { 0%{ transform:translateY(0) } 50%{ transform:translateY(-10px) } 100%{ transform:translateY(0) } }
-    .sad{ animation: sad .7s ease-in-out 3 }
-    @keyframes sad { 0%{ transform:rotate(0) } 50%{ transform:rotate(-7deg) } 100%{ transform:rotate(0) } }
+    /* Speech bubbles */
+    .bubble{
+      position:absolute; bottom:118px;
+      max-width:220px; padding:6px 8px; border-radius:10px;
+      background:#081221; border:2px solid var(--edge-2);
+      box-shadow:0 3px 0 #010409; font-size:11px; opacity:0; pointer-events:none;
+      transform: translateY(8px) scale(.98);
+      transition: opacity .15s ease, transform .15s ease;
+      white-space:normal; line-height:1.4;
+    }
+    .bubble:after{
+      content:""; position:absolute; left:18px; top:100%;
+      border:8px solid transparent; border-top-color:var(--edge-2);
+      filter: drop-shadow(0 2px 0 #010409);
+    }
+    .char.cajun .bubble{ right:0; left:auto; }
+    .char.cajun .bubble:after{ left:auto; right:18px }
+    .bubble.show{ opacity:1; transform: translateY(0) scale(1) }
+
+    /* Sprite-sheet animation using CSS steps; 4 frames horizontally */
+    .animate-frames{ animation: talk 0.8s steps(4) infinite }
+    @keyframes talk { from{ background-position:0 0 } to{ background-position:-384px 0 } }
+
+    /* Scene reactions */
+    .lean{ animation: lean .6s ease-in-out infinite alternate }
+    @keyframes lean { from{ transform:translateY(-1px) rotate(-1deg) } to{ transform:translateY(-3px) rotate(1deg) } }
+    .pump{ animation: pump .55s ease-in-out 6 }
+    @keyframes pump { 0%{ transform:translateY(0) } 50%{ transform:translateY(-12px) } 100%{ transform:translateY(0) } }
+    .slump{ animation: slump .7s ease-in-out 3 }
+    @keyframes slump { 0%{ transform:rotate(0) } 50%{ transform:rotate(-7deg) translateY(2px) } 100%{ transform:rotate(0) } }
+    .shake{ animation: shake .4s ease-in-out 1 }
+    @keyframes shake { 0%,100%{ transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
 
     /* —— HUD / Controls ————————————————— */
     .hud{
-      display:grid; grid-template-columns:1fr auto 1fr; gap:8px; align-items:center;
-      background:linear-gradient(#0c1422,#0b1320); border:4px solid #0b1320; outline:2px solid #30425f;
-      padding:10px; border-radius:16px; box-shadow:0 8px 0 #070b13, inset 0 0 0 2px #1f2d47;
+      display:grid; grid-template-columns:1fr auto 1fr; gap:10px; align-items:center;
+      background:linear-gradient(#0c1422,#0b1320); border:4px solid var(--panel-2); outline:2px solid var(--edge);
+      padding:12px; border-radius:16px; box-shadow:0 8px 0 var(--shadow), inset 0 0 0 2px #1f2d47;
     }
     .pill{ background:#081221; border:2px solid #203354; border-radius:999px; padding:8px 12px; font-size:12px; white-space:nowrap }
     .val.you{ color:var(--good) } .val.opp{ color:var(--bad) }
     .controls{ display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; font-size:12px }
     .controls input[type="text"], .controls input[type="number"]{
-      width:80px; text-transform:uppercase; text-align:center;
+      width:84px; text-transform:uppercase; text-align:center;
       padding:8px 10px; border-radius:10px; border:2px solid #263852; background:#0a1221; color:var(--text);
     }
-    .btn{ border:0; cursor:pointer; padding:10px 12px; border-radius:12px; font-family:inherit;
+    .btn{ border:0; cursor:pointer; padding:10px 14px; border-radius:12px; font-family:inherit;
       background:linear-gradient(#17365d,#0f2745); color:#cfe6ff; box-shadow:0 4px 0 #0a1a2f, inset 0 0 0 2px #28456d }
     .btn:active{ transform:translateY(2px) }
-    .switch{ display:flex; align-items:center; gap:8px; font-size:10px; opacity:.9 }
 
     /* —— Round / Flights ———————————————— */
-    .arena{ margin:12px 0 10px; background:var(--panel); border:4px solid #091220; outline:2px solid #2c4166; border-radius:18px; padding:14px }
+    .arena{ margin:14px 0 10px; background:var(--panel); border:4px solid #091220; outline:2px solid var(--edge); border-radius:18px; padding:14px; box-shadow:0 8px 0 var(--shadow) }
     .flights{ display:grid; grid-template-columns:1fr 1fr; gap:12px }
     .card{
-      cursor:pointer; background:#091220; border:3px solid #1e314f; outline:2px solid #2c4166; border-radius:12px; padding:12px;
-      min-height:110px; transition:filter .1s, transform .05s;
+      cursor:pointer; background:#0a1425; border:3px solid var(--edge-2); outline:2px solid var(--edge); border-radius:12px; padding:12px;
+      min-height:118px; transition:filter .1s, transform .05s;
+      box-shadow: inset 0 0 0 2px #0f1e35;
     }
     .card:hover{ filter:brightness(1.08) }
     .card:active{ transform:translateY(2px) }
-    .line{ font-size:12px; margin-bottom:6px }
+    .card.selected{ box-shadow: inset 0 0 0 2px var(--accent), 0 0 12px rgba(51,225,255,.35) }
+    .line{ font-size:12px; margin-bottom:6px; letter-spacing:1px }
     .eta{ font-size:11px; opacity:.9 }
-    .progress{ height:14px; background:#0f1b2e; border:2px solid #1d2e4a; border-radius:999px; overflow:hidden; margin-top:8px }
-    .bar{ height:100%; width:0%; background:linear-gradient(90deg,#2ce3ff,#6ff9ff) }
-    .log{ margin-top:10px; font-size:12px; min-height:22px; opacity:.95; text-align:center }
+    .progress{ position:relative; height:16px; background:#0f1b2e; border:2px solid #1d2e4a; border-radius:999px; overflow:hidden; margin-top:10px }
+    .bar{ height:100%; width:0%; background:linear-gradient(90deg,var(--runway),var(--runway-glow)); box-shadow:0 0 10px var(--runway-glow) inset, 0 0 6px var(--runway-glow) }
+    .bar:after{ content:""; position:absolute; right:10px; top:50%; width:6px; height:6px; background:#d8ffff; border-radius:50%; transform:translateY(-50%); filter:blur(.8px) }
+    .log{ margin-top:12px; font-size:12px; min-height:22px; opacity:.95; text-align:center }
 
     @media (max-width:720px){
-      .char{ width:100px; height:100px; bottom:58px }
+      .char{ width:100px; height:100px; bottom:62px }
       .sprite{ width:84px; height:84px; background-size:336px 84px }
       .flights{ grid-template-columns:1fr }
     }
@@ -112,13 +147,15 @@
   <div class="frame">
     <div class="title">DIPLOMAT’S CLUB</div>
 
-    <!-- Always-on character row (no idle bob; perfectly still by default) -->
-    <div class="sofa" aria-hidden="true">
-      <div class="char kessler">
+    <!-- Always-on character row -->
+    <div class="sofa" aria-hidden="true" id="sofa">
+      <div class="char kessler" id="charK">
         <div id="sprK" class="sprite"></div>
+        <div class="bubble" id="bubbleK"></div>
       </div>
-      <div class="char cajun">
+      <div class="char cajun" id="charT">
         <div id="sprT" class="sprite"></div>
+        <div class="bubble" id="bubbleT"></div>
       </div>
       <div class="couch"></div>
     </div>
@@ -126,8 +163,10 @@
     <div class="hud">
       <div class="pill">KESSLER: <span id="youCash" class="val you">$500</span></div>
       <div class="controls">
-        <label class="switch"><input id="liveToggle" type="checkbox"/> LIVE</label>
-        <span>Airport</span><input id="airport" type="text" maxlength="4" value="JFK" />
+        <label style="display:flex;align-items:center;gap:8px;font-size:10px;opacity:.9">
+          <input id="liveToggle" type="checkbox"/> LIVE Airport
+        </label>
+        <input id="airport" type="text" maxlength="4" value="JFK" />
         <span>Bet</span><input id="betIn" type="number" value="50" step="25" min="25" />
         <button id="deal" class="btn">Deal flights</button>
         <button id="reset" class="btn">Reset</button>
@@ -135,7 +174,7 @@
       <div class="pill">THE CAJUN: <span id="oppCash" class="val opp">$2000</span></div>
     </div>
 
-    <div class="arena">
+    <div class="arena" id="arena">
       <div class="flights">
         <div id="A" class="card">
           <div class="line" id="lineA">A — waiting…</div>
@@ -148,7 +187,7 @@
           <div class="progress"><div id="barB" class="bar"></div></div>
         </div>
       </div>
-      <div class="log" id="log">Hit “Deal flights” then tap A or B to bet winner-takes-all.</div>
+      <div class="log" id="log">Deal, then tap A or B to bet winner-takes-all.</div>
     </div>
   </div>
 
