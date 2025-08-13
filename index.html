@@ -5,140 +5,92 @@
   <title>Diplomat’s Club</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
-
   <style>
     :root{
-      --bg:#10151f;
-      --panel:#0f1b2e;
-      --accent:#33e1ff;
-      --good:#5CFF7A;
-      --bad:#ff6363;
-      --chip:#ffd36b;
+      --bg:#10151f; --panel:#0f1b2e; --accent:#33e1ff; --good:#5CFF7A; --bad:#ff6b6b;
       --text:#e9f0ff;
     }
-    *{ box-sizing:border-box }
-    html,body{ height:100% }
+    *{box-sizing:border-box}
+    html,body{height:100%}
     body{
-      margin:0;
-      background: radial-gradient(1200px 600px at 30% 0%, #15243c, var(--bg));
-      color:var(--text);
-      font-family:"Press Start 2P", system-ui, monospace;
-      letter-spacing: .5px;
-      display:flex;
-      flex-direction:column;
-      align-items:center;
+      margin:0; background:#0c1220; color:var(--text);
+      font-family:"Press Start 2P",system-ui,monospace; letter-spacing:.5px;
+      display:flex; flex-direction:column; align-items:center;
     }
+    .frame{ width:min(100%, 980px); padding:12px }
+    .title{ text-align:center; font-size:clamp(16px,3vw,28px); margin:10px 0 6px; text-shadow:0 3px 0 #000 }
 
-    .frame{
-      width:min(100%, 980px);
-      padding:12px;
+    /* —— SOFA ——————————————————— */
+    .sofa{
+      position:relative; height:160px; margin:8px 0 12px;
+      border:4px solid #0b1320; outline:2px solid #2c4166; border-radius:18px; overflow:hidden;
+      background:
+        linear-gradient(#1c2c49,#13243f) padding-box,
+        repeating-linear-gradient(0deg,#0b1320 0 2px,#0f1b2e 2px 4px);
     }
-    .title{
-      text-align:center;
-      font-size: clamp(16px, 3vw, 28px);
-      margin:10px 0 6px;
-      text-shadow:0 3px 0 #000;
+    .couch{
+      position:absolute; left:8px; right:8px; bottom:8px; height:70px; border-radius:14px;
+      background: linear-gradient(#6b431d,#4c2d12); border:3px solid #2e1a0b; box-shadow: inset 0 8px 0 #2c180a;
     }
+    .char{
+      position:absolute; bottom:56px; width:120px; height:120px; image-rendering:pixelated;
+      display:flex; align-items:flex-end; justify-content:center;
+      filter: drop-shadow(0 6px 0 #070b13);
+    }
+    .char.kessler{ left:48px }
+    .char.cajun{ right:48px }
+    .sprite{
+      width:96px; height:96px; background-size:cover; background-repeat:no-repeat;
+      border:3px solid #1a2b4a; border-radius:10px; background-color:#132240;
+    }
+    /* Sprite-sheet animation using CSS steps; each sheet is 4 frames horizontally */
+    .animate-frames{ animation: play 0.8s steps(4) infinite }
+    @keyframes play { from{ background-position:0 0 } to{ background-position:-384px 0 } }
+    /* Idle bob and little hat wobble */
+    .bob{ animation: bob 2s ease-in-out infinite }
+    @keyframes bob { 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(-3px) } }
+    .cheer{ animation: cheer .55s ease-in-out 6 }
+    @keyframes cheer { 0%{ transform:translateY(0) } 50%{ transform:translateY(-10px) } 100%{ transform:translateY(0) } }
+    .sad{ animation: sad .7s ease-in-out 3 }
+    @keyframes sad { 0%{ transform:rotate(0) } 50%{ transform:rotate(-7deg) } 100%{ transform:rotate(0) } }
+
+    /* —— HUD / Controls ————————————————— */
     .hud{
-      display:grid;
-      grid-template-columns: 1fr auto 1fr;
-      gap:8px;
-      align-items:center;
-      background: linear-gradient(#0c1422, #0b1320);
-      border:4px solid #0b1320;
-      outline:2px solid #30425f;
-      padding:10px;
-      border-radius:16px;
-      box-shadow: 0 8px 0 #070b13, inset 0 0 0 2px #1f2d47;
+      display:grid; grid-template-columns:1fr auto 1fr; gap:8px; align-items:center;
+      background:linear-gradient(#0c1422,#0b1320); border:4px solid #0b1320; outline:2px solid #30425f;
+      padding:10px; border-radius:16px; box-shadow:0 8px 0 #070b13, inset 0 0 0 2px #1f2d47;
     }
-    .money{
-      display:flex; gap:14px; align-items:center; justify-content:flex-start;
-      font-size:12px;
-    }
-    .money .pill{
-      background:#081221; border:2px solid #203354; border-radius:999px; padding:8px 12px;
-      box-shadow: inset 0 0 0 2px #0e1b33;
-    }
-    .money .val{ color:var(--good) }
-    .money .opp .val{ color:var(--bad) }
-
-    .controls{
-      display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap;
-    }
-    .controls input[type="text"]{
-      width:64px; text-transform:uppercase; text-align:center;
+    .pill{ background:#081221; border:2px solid #203354; border-radius:999px; padding:8px 12px; font-size:12px }
+    .val.you{ color:var(--good) } .val.opp{ color:var(--bad) }
+    .controls{ display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; font-size:12px }
+    .controls input[type="text"], .controls input[type="number"]{
+      width:80px; text-transform:uppercase; text-align:center;
       padding:8px 10px; border-radius:10px; border:2px solid #263852; background:#0a1221; color:var(--text);
     }
-    .btn{
-      border:0; cursor:pointer; padding:10px 12px; border-radius:12px; font-family:inherit;
-      background:linear-gradient(#17365d,#0f2745);
-      color:#cfe6ff; box-shadow:0 4px 0 #0a1a2f, inset 0 0 0 2px #28456d;
-      transition: transform .05s ease-in-out, filter .1s;
-    }
-    .btn:hover{ filter:brightness(1.1) }
-    .btn:active{ transform: translateY(2px) }
-    .btn[disabled]{ opacity:.45; cursor:not-allowed; filter:grayscale(30%) }
-    .switch{
-      display:flex; align-items:center; gap:8px; font-size:10px; opacity:.9;
-    }
-    .switch input{ transform: scale(1.2); accent-color: var(--accent); }
+    .btn{ border:0; cursor:pointer; padding:10px 12px; border-radius:12px; font-family:inherit;
+      background:linear-gradient(#17365d,#0f2745); color:#cfe6ff; box-shadow:0 4px 0 #0a1a2f, inset 0 0 0 2px #28456d }
+    .btn:active{ transform:translateY(2px) }
+    .switch{ display:flex; align-items:center; gap:8px; font-size:10px; opacity:.9 }
 
-    .arena{
-      margin:14px 0 10px;
-      background: repeating-linear-gradient(0deg,#0b1320 0 2px,#0f1b2e 2px 4px);
-      border:4px solid #091220; outline:2px solid #2c4166;
-      border-radius:18px; padding:14px;
-    }
-    .fighters{
-      display:grid; grid-template-columns: 1fr 80px 1fr; gap:12px; align-items:center;
-    }
-    .sprite{
-      height:120px; border-radius:12px; border:3px solid #1a2b4a; background:#132240;
-      display:flex; align-items:center; justify-content:center; position:relative;
-      image-rendering: pixelated;
-    }
-    .sprite:before, .sprite:after{
-      content:""; position:absolute; inset:8px; border:3px solid #22385f; border-radius:10px;
-    }
-    .kramer{ background:#173a53 }
-    .texan{ background:#502e20 }
-    .vs{
-      text-align:center; font-size:14px; color:var(--accent);
-    }
-
-    .round{
-      display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:12px;
-    }
+    /* —— Round / Flights ———————————————— */
+    .arena{ margin:12px 0 10px; background:var(--panel); border:4px solid #091220; outline:2px solid #2c4166; border-radius:18px; padding:14px }
+    .flights{ display:grid; grid-template-columns:1fr 1fr; gap:12px }
     .card{
-      background:#091220; border:3px solid #1e314f; outline:2px solid #2c4166;
-      border-radius:12px; padding:10px; min-height:116px;
+      cursor:pointer; background:#091220; border:3px solid #1e314f; outline:2px solid #2c4166; border-radius:12px; padding:12px;
+      min-height:110px; transition:filter .1s, transform .05s;
     }
-    .flightline{ font-size:12px; line-height:1.5; }
-    .eta{ opacity:.85 }
-    .progress{
-      height:14px; background:#0f1b2e; border:2px solid #1d2e4a; border-radius:999px; overflow:hidden;
-      margin-top:8px;
-    }
-    .bar{ height:100%; width:0%; background:linear-gradient(90deg,#2ce3ff,#6ff9ff); }
+    .card:hover{ filter:brightness(1.08) }
+    .card:active{ transform:translateY(2px) }
+    .line{ font-size:12px; margin-bottom:6px }
+    .eta{ font-size:11px; opacity:.9 }
+    .progress{ height:14px; background:#0f1b2e; border:2px solid #1d2e4a; border-radius:999px; overflow:hidden; margin-top:8px }
+    .bar{ height:100%; width:0%; background:linear-gradient(90deg,#2ce3ff,#6ff9ff) }
+    .log{ margin-top:10px; font-size:12px; min-height:22px; opacity:.95; text-align:center }
 
-    .chips{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px }
-    .chip{
-      background: radial-gradient(circle at 30% 30%, #fff4c0, var(--chip));
-      border:2px solid #8a6a1b; border-radius:999px; padding:6px 10px; cursor:pointer;
-      color:#3b2900; text-shadow:0 1px 0 rgba(255,255,255,.35);
-      box-shadow:0 3px 0 #5b4412;
-      font-size:11px;
-    }
-    .chip:active{ transform: translateY(1px) }
-    .betline{ margin-top:8px; font-size:12px }
-    .log{
-      margin-top:10px; font-size:12px; min-height:22px; opacity:.9;
-    }
-
-    /* Mobile tweaks */
     @media (max-width:720px){
-      .fighters{ grid-template-columns: 1fr 56px 1fr }
-      .sprite{ height:86px }
+      .char{ width:100px; height:100px; bottom:58px }
+      .sprite{ width:84px; height:84px }
+      .flights{ grid-template-columns:1fr }
     }
   </style>
 </head>
@@ -146,67 +98,43 @@
   <div class="frame">
     <div class="title">DIPLOMAT’S CLUB</div>
 
+    <!-- Always-on character row -->
+    <div class="sofa" aria-hidden="true">
+      <div class="char kessler bob">
+        <div id="sprK" class="sprite"></div>
+      </div>
+      <div class="char cajun bob">
+        <div id="sprT" class="sprite"></div>
+      </div>
+      <div class="couch"></div>
+    </div>
+
     <div class="hud">
-      <div class="money">
-        <div class="pill">KRAMER BANK: <span id="youCash" class="val">$500</span></div>
-        <div class="pill opp">TEXAN BANK: <span id="oppCash" class="val">$2000</span></div>
-      </div>
-
+      <div class="pill">KESSLER: <span id="youCash" class="val you">$500</span></div>
       <div class="controls">
-        <label class="switch">
-          <input id="liveToggle" type="checkbox" />
-          <span>LIVE MODE</span>
-        </label>
-        <span>Airport:</span>
-        <input id="airport" type="text" maxlength="4" value="JFK" />
-        <button id="deal" class="btn">Deal Flights</button>
-        <button id="nextRound" class="btn" disabled>Next Round</button>
+        <label class="switch"><input id="liveToggle" type="checkbox"/> LIVE</label>
+        <span>Airport</span><input id="airport" type="text" maxlength="4" value="JFK" />
+        <span>Bet</span><input id="betIn" type="number" value="50" step="25" min="25" />
+        <button id="deal" class="btn">Deal flights</button>
+        <button id="reset" class="btn">Reset</button>
       </div>
-
-      <div class="money" style="justify-content:flex-end">
-        <div class="pill">BET: <span id="betAmt" class="val">$50</span></div>
-      </div>
+      <div class="pill">THE CAJUN: <span id="oppCash" class="val opp">$2000</span></div>
     </div>
 
     <div class="arena">
-      <div class="fighters">
-        <div class="sprite kramer" title="Kramer (you)">KRAMER</div>
-        <div class="vs">VS</div>
-        <div class="sprite texan" title="Wealthy Texan">TEXAN</div>
-      </div>
-
-      <div class="round">
-        <div class="card">
-          <div class="flightline" id="lineA">A — waiting...</div>
+      <div class="flights">
+        <div id="A" class="card">
+          <div class="line" id="lineA">A — waiting…</div>
           <div class="eta" id="etaA"></div>
           <div class="progress"><div id="barA" class="bar"></div></div>
-          <div class="chips">
-            <button class="chip" data-add="25">+25</button>
-            <button class="chip" data-add="50">+50</button>
-            <button class="chip" data-add="100">+100</button>
-            <button class="chip" data-add="0" id="allIn">ALL-IN</button>
-          </div>
-          <div class="betline">
-            <button id="betA" class="btn" disabled>Bet on Flight A</button>
-          </div>
         </div>
-
-        <div class="card">
-          <div class="flightline" id="lineB">B — waiting...</div>
+        <div id="B" class="card">
+          <div class="line" id="lineB">B — waiting…</div>
           <div class="eta" id="etaB"></div>
           <div class="progress"><div id="barB" class="bar"></div></div>
-          <div class="chips">
-            <button class="chip" data-add="-25">−25</button>
-            <button class="chip" data-add="-50">−50</button>
-            <button class="chip" data-add="-100">−100</button>
-          </div>
-          <div class="betline">
-            <button id="betB" class="btn" disabled>Bet on Flight B</button>
-          </div>
         </div>
       </div>
-
-      <div class="log" id="log">Place a bet once flights are dealt.</div>
+      <div class="log" id="log">Hit “Deal flights” then tap A or B to bet winner-takes-all.</div>
     </div>
   </div>
 
