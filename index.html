@@ -4,171 +4,199 @@
   <meta charset="utf-8" />
   <title>Diplomat’s Club</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800&display=swap" rel="stylesheet">
+
+  <!-- Leaflet (mini-maps) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="" crossorigin="anonymous">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="" crossorigin="anonymous"></script>
+
   <style>
     :root{
-      --bg:#0b1220; --panel:#0f1b2e; --panel-2:#0a1424;
-      --text:#E9F0FF; --accent:#33E1FF; --good:#78FF9F; --bad:#FF6B6B;
-      --edge:#2c4166; --edge-2:#1e314f; --shadow:#070b13;
-      --runway:#2ce3ff; --runway-glow:#98f6ff;
+      --bg:#f6f7f9; --card:#ffffff; --ink:#0f1720; --muted:#5b6472;
+      --accent:#0058ff; --accent-2:#4c8dff; --good:#079455; --bad:#E11D48;
+      --ring:#dfe5ee; --ring-2:#cfd7e3; --shadow:rgba(16,24,40,.08);
+      --runway:#2bbef3; --runway-glow:#a8eaff;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
     body{
-      margin:0; background: radial-gradient(1100px 800px at 25% -10%, #15243c, var(--bg));
-      color:var(--text); font-family:"Press Start 2P", system-ui, monospace; letter-spacing:.5px;
-      display:flex; flex-direction:column; align-items:center;
+      margin:0; background:var(--bg); color:var(--ink);
+      font-family:"Inter", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      line-height:1.2; display:flex; flex-direction:column; align-items:center;
     }
+    .frame{ width:min(100%,1000px); padding:18px 16px 40px }
 
-    .frame{ width:min(100%,1000px); padding:16px }
     .title{
-      text-align:center; font-size:clamp(18px,3.2vw,34px); margin:6px 0 12px;
-      letter-spacing:2px; text-shadow:0 3px 0 #000, 0 0 16px rgba(51,225,255,.25);
+      font-weight:800; letter-spacing:.06em; text-align:center;
+      font-size:clamp(22px, 4vw, 40px); margin:6px 0 16px;
     }
 
-    /* ——— Scoreboard / Avatars ——— */
-    .scorebar{
-      display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:center;
-      background:linear-gradient(#1b2844,#12243f); border:4px solid #0b1320; outline:2px solid var(--edge);
-      border-radius:16px; padding:10px 14px; box-shadow:0 8px 0 var(--shadow), inset 0 0 0 2px #1f2d47;
+    /* Header strip */
+    .players{
+      display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:12px;
+      background:var(--card); border:1px solid var(--ring); border-radius:16px; padding:12px 16px;
+      box-shadow:0 8px 24px var(--shadow);
     }
-    .side{ display:flex; align-items:center; gap:12px }
-    .side.right{ justify-content:flex-end }
+    .p-side{ display:flex; align-items:center; gap:12px }
+    .p-side.right{ justify-content:flex-end }
     .avatar{
-      width:64px; height:64px; flex:0 0 64px; border-radius:14px; overflow:hidden;
-      background:linear-gradient(#22375f,#182b4a); border:2px solid #1b2f53; box-shadow: inset 0 0 0 2px #0f1e35;
-      display:grid; place-items:center;
-      transform-origin:50% 85%; /* animations pivot */
+      position:relative; width:56px; height:56px; border-radius:14px; background:#f0f3f8; border:1px solid var(--ring-2);
+      display:grid; place-items:center; overflow:hidden;
     }
-    .name{ font-size:12px; opacity:.9 }
-    .cash{ padding:6px 10px; border-radius:999px; border:2px solid #203354; background:#081221; font-size:12px }
-    .cash .you{ color:var(--good) } .cash .opp{ color:var(--bad) }
-
-    /* tiny speech bubbles */
     .bubble{
-      position:absolute; transform: translate(-50%,-10px); left:50%; top:-6px;
-      background:#081221; border:2px solid var(--edge-2); padding:6px 8px; border-radius:10px;
-      font-size:10px; white-space:nowrap; opacity:0; pointer-events:none;
-      transition: opacity .15s ease, transform .15s ease;
+      position:absolute; left:50%; top:-6px; transform:translate(-50%,-6px);
+      background:#111827; color:#fff; font-size:12px; padding:6px 8px; border-radius:10px;
+      opacity:0; pointer-events:none; transition:opacity .15s ease, transform .15s ease;
+      white-space:nowrap;
     }
-    .bubble:after{ content:""; position:absolute; left:12px; top:100%;
-      border:8px solid transparent; border-top-color:var(--edge-2); filter:drop-shadow(0 2px 0 #010409);
-    }
-    .bubble.show{ opacity:1; transform: translate(-50%,-16px) }
+    .bubble:after{ content:""; position:absolute; left:10px; top:100%; border:8px solid transparent; border-top-color:#111827 }
+    .bubble.show{ opacity:1; transform:translate(-50%,-12px) }
 
-    /* SVG avatars react with classes */
+    .name{ font-weight:700; font-size:14px }
+    .bank{
+      display:inline-flex; gap:8px; align-items:center; font-weight:700; font-size:14px;
+      background:#f2f5fb; border:1px solid var(--ring); border-radius:999px; padding:8px 12px;
+    }
+    .bank .you{ color:var(--good) } .bank .opp{ color:var(--bad) }
+
+    /* Controls */
+    .controls{
+      margin-top:12px; background:var(--card); border:1px solid var(--ring); border-radius:16px; padding:12px 16px;
+      box-shadow:0 8px 24px var(--shadow); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+    }
+    .ctl{ display:flex; align-items:center; gap:8px; color:var(--muted); font-weight:600 }
+    .ctl input[type="text"], .ctl input[type="number"]{
+      width:86px; padding:10px 12px; border-radius:10px; border:1px solid var(--ring-2); background:#fff; color:var(--ink); font-weight:700; text-align:center;
+    }
+    .btn{
+      border:1px solid var(--ring-2); background:#eef4ff; color:#1b3b8f; font-weight:800;
+      padding:10px 14px; border-radius:12px; cursor:pointer;
+    }
+    .btn.primary{ background:var(--accent); color:#fff; border-color:var(--accent) }
+    .btn:disabled{ opacity:.55; cursor:not-allowed }
+
+    /* Round */
+    .arena{ margin-top:14px; display:grid; grid-template-columns:1fr 1fr; gap:16px }
+    .card{
+      background:var(--card); border:1px solid var(--ring); border-radius:16px; padding:14px; box-shadow:0 8px 24px var(--shadow);
+    }
+    .line{ font-weight:800; letter-spacing:.05em; margin-bottom:6px }
+    .eta{ color:var(--muted); font-weight:700; font-size:13px }
+
+    .progress{ margin-top:10px; height:14px; background:#eef2f8; border:1px solid var(--ring); border-radius:999px; overflow:hidden; position:relative }
+    .bar{ height:100%; width:0%; background:linear-gradient(90deg,var(--runway),var(--runway-glow)); box-shadow:0 0 10px var(--runway-glow) inset, 0 0 6px var(--runway-glow) }
+
+    .map{ margin-top:10px; height:180px; border-radius:12px; overflow:hidden; border:1px solid var(--ring-2) }
+
+    .log{ grid-column:1 / -1; text-align:center; color:#111827; font-weight:800; background:var(--card); border:1px solid var(--ring); border-radius:14px; padding:12px; box-shadow:0 8px 24px var(--shadow) }
+
+    /* Head flip (Terence & Philip style) */
+    .flip{ transform-origin:50% 52%; }
+    .talk .flip{ animation:flap .45s ease-in-out infinite }
+    @keyframes flap { 0%,100%{ transform:rotate(0) } 50%{ transform:rotate(-14deg) } }
+
+    /* Reactions */
     .lean{ animation: lean .6s ease-in-out infinite alternate }
     @keyframes lean { from{ transform:translateY(-1px) rotate(-1deg) } to{ transform:translateY(-3px) rotate(1deg) } }
     .pump{ animation: pump .55s ease-in-out 6 }
-    @keyframes pump { 0%{ transform:translateY(0) } 50%{ transform:translateY(-12px) } 100%{ transform:translateY(0) } }
+    @keyframes pump { 0%{ transform:translateY(0) } 50%{ transform:translateY(-10px) } 100%{ transform:translateY(0) } }
     .slump{ animation: slump .7s ease-in-out 3 }
-    @keyframes slump { 0%{ transform:rotate(0) } 50%{ transform:rotate(-7deg) translateY(2px) } 100%{ transform:rotate(0) } }
-    .shake{ animation: shake .4s ease-in-out 1 }
-    @keyframes shake { 0%,100%{ transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
+    @keyframes slump { 0%{ transform:rotate(0) } 50%{ transform:rotate(-6deg) translateY(2px) } 100%{ transform:rotate(0) } }
 
-    /* ——— Controls ——— */
-    .hud{
-      display:grid; grid-template-columns:1fr auto 1fr; gap:10px; align-items:center;
-      margin-top:10px; background:linear-gradient(#0c1422,#0b1320); border:4px solid #0b1320; outline:2px solid var(--edge);
-      padding:12px; border-radius:16px; box-shadow:0 8px 0 var(--shadow), inset 0 0 0 2px #1f2d47;
-    }
-    .controls{ display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; font-size:12px }
-    .controls input[type="text"], .controls input[type="number"]{
-      width:84px; text-transform:uppercase; text-align:center;
-      padding:8px 10px; border-radius:10px; border:2px solid #263852; background:#0a1221; color:var(--text);
-    }
-    .btn{ border:0; cursor:pointer; padding:10px 14px; border-radius:12px; font-family:inherit;
-      background:linear-gradient(#17365d,#0f2745); color:#cfe6ff; box-shadow:0 4px 0 #0a1a2f, inset 0 0 0 2px #28456d }
-    .btn:active{ transform:translateY(2px) }
-
-    /* ——— Round / Flights ——— */
-    .arena{ margin:14px 0 10px; background:var(--panel); border:4px solid #091220; outline:2px solid var(--edge); border-radius:18px; padding:14px; box-shadow:0 8px 0 var(--shadow) }
-    .flights{ display:grid; grid-template-columns:1fr 1fr; gap:12px }
-    .card{
-      cursor:pointer; background:var(--panel-2); border:3px solid var(--edge-2); outline:2px solid var(--edge); border-radius:12px; padding:12px;
-      min-height:118px; transition:filter .1s, transform .05s;
-      box-shadow: inset 0 0 0 2px #0f1e35;
-    }
-    .card:hover{ filter:brightness(1.08) }
-    .card:active{ transform:translateY(2px) }
-    .card.selected{ box-shadow: inset 0 0 0 2px var(--accent), 0 0 12px rgba(51,225,255,.35) }
-    .line{ font-size:12px; margin-bottom:6px; letter-spacing:1px }
-    .eta{ font-size:11px; opacity:.9 }
-    .progress{ position:relative; height:16px; background:#0f1b2e; border:2px solid #1d2e4a; border-radius:999px; overflow:hidden; margin-top:10px }
-    .bar{ height:100%; width:0%; background:linear-gradient(90deg,var(--runway),var(--runway-glow)); box-shadow:0 0 10px var(--runway-glow) inset, 0 0 6px var(--runway-glow) }
-    .bar:after{ content:""; position:absolute; right:10px; top:50%; width:6px; height:6px; background:#d8ffff; border-radius:50%; transform:translateY(-50%); filter:blur(.8px) }
-    .log{ margin-top:12px; font-size:12px; min-height:22px; opacity:.95; text-align:center }
-
-    @media (max-width:720px){
-      .flights{ grid-template-columns:1fr }
+    @media (max-width:820px){
+      .arena{ grid-template-columns:1fr }
     }
   </style>
 </head>
 <body>
   <div class="frame">
-    <div class="title">DIPLOMAT’S CLUB</div>
+    <div class="title">Diplomat’s Club</div>
 
-    <!-- Scorebar with minimal SVG avatars -->
-    <div class="scorebar" id="sofa">
-      <div class="side">
+    <!-- Players header -->
+    <div class="players" id="sofa">
+      <div class="p-side">
         <div class="avatar" id="charK">
-          <!-- Kessler: hair silhouette + jacket (pure SVG) -->
-          <svg viewBox="0 0 64 64" width="48" height="48" aria-hidden="true">
-            <rect x="0" y="0" width="64" height="64" rx="10" fill="#182a48"/>
-            <path d="M34 8c-8 2-10 8-10 14v6h16v-4c0-6 4-10 4-12-2-4-6-5-10-4z" fill="#141824"/>
-            <circle cx="32" cy="28" r="10" fill="#f4c7a0"/>
-            <rect x="18" y="40" width="28" height="16" rx="4" fill="#6e4e1e" />
-            <rect x="30" y="40" width="4" height="16" fill="#142440"/>
+          <!-- KESSLER SVG (more detailed hair, jacket; head-top in .flip group) -->
+          <svg viewBox="0 0 80 80" width="48" height="48" aria-hidden="true">
+            <rect x="0" y="0" width="80" height="80" rx="14" fill="#e9edf5"/>
+            <g id="kessler">
+              <g class="flip">
+                <path d="M44 12c-9 2-14 7-15 14l10 4c2-5 8-7 12-7 2-4-2-9-7-11z" fill="#2a2a32"/>
+              </g>
+              <circle cx="38" cy="36" r="13" fill="#f4c7a0"/>
+              <rect x="20" y="50" width="36" height="18" rx="6" fill="#a7742a"/>
+              <rect x="36" y="50" width="6" height="18" fill="#20304c"/>
+              <rect x="31" y="33" width="4" height="3" rx="1" fill="#1c2436"/>
+              <rect x="44" y="33" width="4" height="3" rx="1" fill="#1c2436"/>
+              <rect x="40" y="38" width="6" height="3" rx="1.5" fill="#1c2436"/>
+            </g>
           </svg>
           <div class="bubble" id="bubbleK"></div>
         </div>
         <div class="name">KESSLER</div>
       </div>
-      <div class="side right">
+
+      <div class="bank">KESSLER: <span id="youCash" class="you">500 sirignanos</span></div>
+
+      <div class="p-side right">
         <div class="name">THE CAJUN</div>
         <div class="avatar" id="charT">
-          <!-- Cajun: oversized foam hat -->
-          <svg viewBox="0 0 64 64" width="48" height="48" aria-hidden="true">
-            <rect x="0" y="0" width="64" height="64" rx="10" fill="#182a48"/>
-            <path d="M32 6c-7 0-12 7-12 16h24C44 13 39 6 32 6z" fill="#e8d1a8"/>
-            <rect x="10" y="20" width="44" height="8" rx="4" fill="#d8bf94"/>
-            <circle cx="32" cy="30" r="9" fill="#f6c8a0"/>
-            <rect x="20" y="40" width="28" height="16" rx="4" fill="#32528a" />
-            <rect x="30" y="40" width="4" height="16" fill="#0f1f3b"/>
+          <!-- CAJUN SVG (big foam hat; head-top in .flip group) -->
+          <svg viewBox="0 0 80 80" width="48" height="48" aria-hidden="true">
+            <rect x="0" y="0" width="80" height="80" rx="14" fill="#e9edf5"/>
+            <g id="cajun">
+              <g class="flip">
+                <path d="M40 10c-10 0-16 9-16 18h32C56 19 50 10 40 10z" fill="#ead6ab"/>
+                <rect x="14" y="26" width="52" height="8" rx="4" fill="#dec89b"/>
+              </g>
+              <circle cx="40" cy="38" r="12" fill="#f4c7a0"/>
+              <rect x="24" y="50" width="32" height="18" rx="6" fill="#355a9a"/>
+              <rect x="38" y="50" width="4" height="18" fill="#20304c"/>
+              <rect x="34" y="35" width="4" height="3" rx="1" fill="#1c2436"/>
+              <rect x="46" y="35" width="4" height="3" rx="1" fill="#1c2436"/>
+              <rect x="42" y="40" width="6" height="3" rx="1.5" fill="#1c2436"/>
+            </g>
           </svg>
           <div class="bubble" id="bubbleT"></div>
         </div>
       </div>
     </div>
 
-    <div class="hud">
-      <div class="cash">KESSLER: <span id="youCash" class="you">$500</span></div>
-      <div class="controls">
-        <label style="display:flex;align-items:center;gap:8px;font-size:10px;opacity:.9">
-          <input id="liveToggle" type="checkbox"/> LIVE Airport
-        </label>
+    <!-- Controls -->
+    <div class="controls">
+      <div class="ctl">
+        <label><input id="liveToggle" type="checkbox"> LIVE airport</label>
         <input id="airport" type="text" maxlength="4" value="JFK" />
+      </div>
+      <div class="ctl">
         <span>Bet</span><input id="betIn" type="number" value="50" step="25" min="25" />
-        <button id="deal" class="btn">Deal flights</button>
+      </div>
+      <div class="ctl" style="gap:8px">
+        <button id="deal" class="btn primary">Deal flights</button>
         <button id="reset" class="btn">Reset</button>
       </div>
-      <div class="cash">THE CAJUN: <span id="oppCash" class="opp">$2,000</span></div>
+      <div class="bank">THE CAJUN: <span id="oppCash" class="opp">2,000 sirignanos</span></div>
     </div>
 
+    <!-- Round -->
     <div class="arena">
-      <div class="flights">
-        <div id="A" class="card">
-          <div class="line" id="lineA">A — waiting…</div>
-          <div class="eta" id="etaA"></div>
-          <div class="progress"><div id="barA" class="bar"></div></div>
-        </div>
-        <div id="B" class="card">
-          <div class="line" id="lineB">B — waiting…</div>
-          <div class="eta" id="etaB"></div>
-          <div class="progress"><div id="barB" class="bar"></div></div>
-        </div>
+      <div class="card" id="A">
+        <div class="line" id="lineA">A — waiting…</div>
+        <div class="eta" id="etaA"></div>
+        <div class="progress"><div class="bar" id="barA"></div></div>
+        <div class="map" id="mapA"></div>
       </div>
-      <div class="log" id="log">Deal, then click A or B to bet winner-takes-all.</div>
+
+      <div class="card" id="B">
+        <div class="line" id="lineB">B — waiting…</div>
+        <div class="eta" id="etaB"></div>
+        <div class="progress"><div class="bar" id="barB"></div></div>
+        <div class="map" id="mapB"></div>
+      </div>
+
+      <div class="log" id="log">Welcome to the Diplomat’s Club. Deal flights to start.</div>
     </div>
   </div>
 
