@@ -1,21 +1,15 @@
-/* Diplomat’s Club — NYT-ish UI, SVG heads that “flip-talk”, mini maps, sirignanos, H2H scaffold */
+/* Diplomat’s Club — NYT-ish UI, improved SVG “head-pop” talk, mini maps, sirignanos */
 
-/* ========= Configure this after you deploy your Lambda =========
-   Your Lambda is expected to return either:
-   (A) Simple mode (no positions):
-       { A:{origin,dest,etaMinutes,callsign}, B:{...} }
-   (B) Map mode (recommended):
-       { A:{origin,dest,etaMinutes,callsign,pos:{lat,lon}},
-         B:{...}, destPos:{lat,lon} }
-=================================================================*/
+/* ========= Configure after you deploy your Lambda =========
+   Lambda return formats accepted:
+   A) No positions:
+      { A:{origin,dest,etaMinutes,callsign}, B:{...} }
+   B) With positions (recommended):
+      { A:{origin,dest,etaMinutes,callsign,pos:{lat,lng|lon}},
+        B:{...},
+        destPos:{lat,lng|lon} }
+============================================================*/
 const LIVE_PROXY = "YOUR_API_GATEWAY_URL";
-
-/* ========= (Optional) Multiplayer via Firebase ================
-   To enable, paste your Firebase config in FIREBASE_CONFIG.
-   Then create a room with “New Match” (we expose create/join helpers),
-   and share the URL with ?room=ROOMID
-=================================================================*/
-const FIREBASE_CONFIG = null; // { apiKey: "...", authDomain:"...", projectId:"...", ... }
 
 /* ---------------- Core Config ---------------- */
 const START_YOU = 500;
@@ -23,7 +17,7 @@ const START_TEXAN = 2000;
 const ROUND_MS = 6500;
 const MIN_BET = 25;
 
-/* Airport coordinates (fallback for maps when Lambda doesn’t provide pos) */
+/* Airport coordinates (fallback for maps when Lambda doesn’t provide) */
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
   YYZ:[43.6777,-79.6248], YUL:[45.4706,-73.7408], YVR:[49.1951,-123.1779],
@@ -62,7 +56,17 @@ const fmtSirig = n => `${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 const setLog = t => log.textContent = t;
 
-/* Head flip / reactions */
+/* normalize any {lat,lng} | {lat,lon} | [lat,lng] into [lat,lng] */
+function toLatLng(p){
+  if(!p) return null;
+  if(Array.isArray(p)) return [p[0], p[1]];
+  if(typeof p === 'object' && 'lat' in p && ('lng' in p || 'lon' in p)){
+    return [p.lat, ('lng' in p) ? p.lng : p.lon];
+  }
+  return null;
+}
+
+/* Head talk / reactions */
 function flipTalk(on=true){
   [charK, charT].forEach(el=> el.classList.toggle("talk", on));
   if(on) setTimeout(()=>flipTalk(false), 900);
@@ -100,26 +104,28 @@ function ensureMap(which){
 }
 
 function fitAndRender(which, flight, destPos){
-  const m = ensureMap(which);
-  const pos = flight.pos ? [flight.pos.lat, flight.pos.lon] : guessPos(flight);
-  const dst = destPos || AIRPORTS[flight.dest] || AIRPORTS[S.airport] || [40.6413,-73.7781];
-  m.plane.setLatLng(pos); m.dest.setLatLng(dst);
-  m.line.setLatLngs([pos, dst]);
+  const M = ensureMap(which);
+  const pos = flight.pos ? toLatLng(flight.pos) : guessPos(flight);
+  const dst = toLatLng(destPos) || toLatLng(AIRPORTS[flight.dest]) || toLatLng(AIRPORTS[S.airport]) || [40.6413,-73.7781];
+
+  M.plane.setLatLng(pos);
+  M.dest.setLatLng(dst);
+  M.line.setLatLngs([pos, dst]);
+
   const bounds = L.latLngBounds([pos, dst]).pad(0.35);
-  m.map.fitBounds(bounds, { animate:false });
+  M.map.fitBounds(bounds, { animate:false });
+
   const distKm = L.latLng(pos[0],pos[1]).distanceTo(L.latLng(dst[0],dst[1]))/1000;
   return Math.max(1, Math.round(distKm));
 }
 
 function guessPos(f){
-  // Roughly place the plane on a segment towards the dest based on ETA.
   const o = AIRPORTS[f.origin], d = AIRPORTS[f.dest];
   if(!o || !d) return AIRPORTS[S.airport] || [40.6413,-73.7781];
-  // fraction from origin to dest (~closer when ETA small)
   const frac = Math.max(.1, Math.min(.9, 1 - (f.etaMinutes/60)));
   const lat = o[0] + (d[0]-o[0]) * frac;
-  const lon = o[1] + (d[1]-o[1]) * frac;
-  return [lat, lon];
+  const lng = o[1] + (d[1]-o[1]) * frac;
+  return [lat, lng];
 }
 
 /* --------------- Flight sources --------------- */
@@ -130,7 +136,8 @@ function simFlights(iata){
     return {origin, dest:iata, etaMinutes:r(3,14), callsign:`${iata}${r(100,999)}`};
   };
   let A=p(),B=p(); if(B.origin===A.origin) B.origin=cities[(cities.indexOf(A.origin)+3)%cities.length];
-  return {A,B, destPos: { lat:(AIRPORTS[iata]||[40.64,-73.77])[0], lon:(AIRPORTS[iata]||[40.64,-73.77])[1] } };
+  const dp = AIRPORTS[iata] ? {lat:AIRPORTS[iata][0], lng:AIRPORTS[iata][1]} : null;
+  return {A,B,destPos:dp};
 }
 async function liveFlights(iata){
   if(!LIVE_PROXY || LIVE_PROXY.includes("YOUR_API_GATEWAY_URL")) throw new Error("Live proxy not configured");
@@ -146,27 +153,26 @@ async function deal(){
   S.airport = (airport.value||"JFK").toUpperCase();
   [lineA,lineB].forEach(el=>el.textContent="Dealing…"); [etaA,etaB].forEach(el=>el.textContent="");
   barA.style.width="0%"; barB.style.width="0%";
+
   setLog(S.live? "Pulling two inbound real flights…" : "Drawing two simulated inbound flights…");
   let data;
   try{ data = S.live ? await liveFlights(S.airport) : simFlights(S.airport); }
   catch(e){ console.warn(e); data = simFlights(S.airport); setLog("Live unavailable—using simulated flights this round."); }
 
-  // Normalize expected shape
-  const destPos = data.destPos || (AIRPORTS[S.airport] ? {lat:AIRPORTS[S.airport][0], lon:AIRPORTS[S.airport][1]} : null);
+  const destPos = data.destPos || (AIRPORTS[S.airport] ? {lat:AIRPORTS[S.airport][0], lng:AIRPORTS[S.airport][1]} : null);
   S.dealt = { A:data.A, B:data.B, destPos };
 
-  // UI
   const {A,B} = S.dealt;
   lineA.textContent = `A — ${A.origin} → ${A.dest} (${A.callsign})`;
   lineB.textContent = `B — ${B.origin} → ${B.dest} (${B.callsign})`;
   etaA.textContent = `ETA ~ ${A.etaMinutes} min`; etaB.textContent = `ETA ~ ${B.etaMinutes} min`;
 
-  // Little talk flip + speech
+  // Talk + bubbles
   flipTalk(true);
   speak(bubbleK, "New action!");
   speak(bubbleT, "Name your flight!");
 
-  // Render maps
+  // Render maps (works in sim mode as well)
   const distA = fitAndRender('A', A, destPos);
   const distB = fitAndRender('B', B, destPos);
   etaA.textContent += ` — ~${distA} km`;
@@ -219,11 +225,6 @@ function resolve(){
   if(S.you<=0){ setLog("Busted! Refresh to try again."); }
   if(S.opp<=0){ setLog("You cleaned him out! The Cajun tips his hat."); }
 }
-
-/* --------------- (Optional) Online H2H scaffold --------------- */
-/* If you paste FIREBASE_CONFIG, you can wire createRoom/joinRoom to buttons.
-   For now we expose placeholders so the UI stays simple. */
-async function initRealtime(){ if(!FIREBASE_CONFIG) return null; /* add Firebase SDK here if you want */ return null; }
 
 /* --------------- Events --------------- */
 $("#A").addEventListener("click", ()=> start('A'));
