@@ -4,13 +4,15 @@
   <meta charset="utf-8" />
   <title>Diplomat’s Club</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Inline favicon so GitHub Pages doesn’t 404 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230058ff'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-family='Arial' font-size='16' fill='white'%3EDC%3C/text%3E%3C/svg%3E">
 
   <!-- Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800&display=swap" rel="stylesheet">
 
   <!-- Leaflet (mini-maps) -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="" crossorigin="anonymous">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
 
   <style>
     :root{
@@ -42,7 +44,7 @@
     .p-side{ display:flex; align-items:center; gap:12px }
     .p-side.right{ justify-content:flex-end }
     .avatar{
-      position:relative; width:56px; height:56px; border-radius:14px; background:#f0f3f8; border:1px solid var(--ring-2);
+      position:relative; width:64px; height:64px; border-radius:14px; background:#f0f3f8; border:1px solid var(--ring-2);
       display:grid; place-items:center; overflow:hidden;
     }
     .bubble{
@@ -92,10 +94,13 @@
 
     .log{ grid-column:1 / -1; text-align:center; color:#111827; font-weight:800; background:var(--card); border:1px solid var(--ring); border-radius:14px; padding:12px; box-shadow:0 8px 24px var(--shadow) }
 
-    /* Head flip (Terence & Philip style) */
-    .flip{ transform-origin:50% 52%; }
-    .talk .flip{ animation:flap .45s ease-in-out infinite }
-    @keyframes flap { 0%,100%{ transform:rotate(0) } 50%{ transform:rotate(-14deg) } }
+    /* ——— Terence & Phillip-style talking heads ——— */
+    .headTop{ transform-origin:50% 58%; }
+    .talk .headTop{ animation:pop .32s ease-in-out infinite }
+    @keyframes pop{ 0%,100%{ transform:translateY(0) rotate(0) } 50%{ transform:translateY(-7px) rotate(-2deg) } }
+    .headBot{ transform-origin:50% 60%; }
+    .talk .headBot{ animation:popbot .32s ease-in-out infinite }
+    @keyframes popbot{ 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(2px) } }
 
     /* Reactions */
     .lean{ animation: lean .6s ease-in-out infinite alternate }
@@ -118,19 +123,25 @@
     <div class="players" id="sofa">
       <div class="p-side">
         <div class="avatar" id="charK">
-          <!-- KESSLER SVG (more detailed hair, jacket; head-top in .flip group) -->
-          <svg viewBox="0 0 80 80" width="48" height="48" aria-hidden="true">
-            <rect x="0" y="0" width="80" height="80" rx="14" fill="#e9edf5"/>
-            <g id="kessler">
-              <g class="flip">
-                <path d="M44 12c-9 2-14 7-15 14l10 4c2-5 8-7 12-7 2-4-2-9-7-11z" fill="#2a2a32"/>
+          <!-- KESSLER: caricature with quiff, brows, blazer; head split into top+bottom groups -->
+          <svg viewBox="0 0 96 96" width="56" height="56" aria-hidden="true">
+            <rect x="0" y="0" width="96" height="96" rx="16" fill="#eef2f8"/>
+            <g transform="translate(48,50)">
+              <!-- top half -->
+              <g class="headTop">
+                <path d="M-6 -30 C-2 -40 16 -42 22 -38 C18 -30 14 -24 14 -16 L-10 -18 Z" fill="#2b2b33"/>
+                <ellipse cx="0" cy="-6" rx="22" ry="18" fill="#f4c7a0"/>
+                <rect x="-8" y="-12" width="6" height="4" rx="2" fill="#1b2233"/>
+                <rect x="6" y="-12" width="6" height="4" rx="2" fill="#1b2233"/>
+                <rect x="-1" y="-3" width="10" height="3" rx="1.5" fill="#1b2233"/>
+                <path d="M-10 -20 q8 -6 16 0" stroke="#1b2233" stroke-width="3" fill="none"/>
               </g>
-              <circle cx="38" cy="36" r="13" fill="#f4c7a0"/>
-              <rect x="20" y="50" width="36" height="18" rx="6" fill="#a7742a"/>
-              <rect x="36" y="50" width="6" height="18" fill="#20304c"/>
-              <rect x="31" y="33" width="4" height="3" rx="1" fill="#1c2436"/>
-              <rect x="44" y="33" width="4" height="3" rx="1" fill="#1c2436"/>
-              <rect x="40" y="38" width="6" height="3" rx="1.5" fill="#1c2436"/>
+              <!-- bottom half -->
+              <g class="headBot">
+                <ellipse cx="0" cy="6" rx="23" ry="17" fill="#f4c7a0"/>
+                <rect x="-18" y="16" width="36" height="18" rx="6" fill="#a7742a"/>
+                <rect x="-2" y="16" width="4" height="18" fill="#20304c"/>
+              </g>
             </g>
           </svg>
           <div class="bubble" id="bubbleK"></div>
@@ -143,20 +154,25 @@
       <div class="p-side right">
         <div class="name">THE CAJUN</div>
         <div class="avatar" id="charT">
-          <!-- CAJUN SVG (big foam hat; head-top in .flip group) -->
-          <svg viewBox="0 0 80 80" width="48" height="48" aria-hidden="true">
-            <rect x="0" y="0" width="80" height="80" rx="14" fill="#e9edf5"/>
-            <g id="cajun">
-              <g class="flip">
-                <path d="M40 10c-10 0-16 9-16 18h32C56 19 50 10 40 10z" fill="#ead6ab"/>
-                <rect x="14" y="26" width="52" height="8" rx="4" fill="#dec89b"/>
+          <!-- CAJUN: oversized foam hat & suit; head split for pop-talk -->
+          <svg viewBox="0 0 96 96" width="56" height="56" aria-hidden="true">
+            <rect x="0" y="0" width="96" height="96" rx="16" fill="#eef2f8"/>
+            <g transform="translate(48,50)">
+              <!-- top half (hat + crown) -->
+              <g class="headTop">
+                <path d="M0 -38 c-16 0 -26 14 -26 28 h52 c0-14 -10-28 -26-28 z" fill="#ead6ab"/>
+                <rect x="-30" y="-10" width="60" height="8" rx="4" fill="#dec89b"/>
+                <ellipse cx="0" cy="-4" rx="20" ry="16" fill="#f4c7a0"/>
+                <circle cx="-6" cy="-6" r="3" fill="#1b2233"/>
+                <circle cx="6" cy="-6" r="3" fill="#1b2233"/>
               </g>
-              <circle cx="40" cy="38" r="12" fill="#f4c7a0"/>
-              <rect x="24" y="50" width="32" height="18" rx="6" fill="#355a9a"/>
-              <rect x="38" y="50" width="4" height="18" fill="#20304c"/>
-              <rect x="34" y="35" width="4" height="3" rx="1" fill="#1c2436"/>
-              <rect x="46" y="35" width="4" height="3" rx="1" fill="#1c2436"/>
-              <rect x="42" y="40" width="6" height="3" rx="1.5" fill="#1c2436"/>
+              <!-- bottom half (jaw + suit) -->
+              <g class="headBot">
+                <ellipse cx="0" cy="7" rx="22" ry="15" fill="#f4c7a0"/>
+                <rect x="-18" y="16" width="36" height="18" rx="6" fill="#355a9a"/>
+                <rect x="-2" y="16" width="4" height="18" fill="#20304c"/>
+                <rect x="-1" y="2" width="10" height="3" rx="1.5" fill="#1b2233"/>
+              </g>
             </g>
           </svg>
           <div class="bubble" id="bubbleT"></div>
