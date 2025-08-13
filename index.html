@@ -4,94 +4,59 @@
   <meta charset="utf-8" />
   <title>Diplomat’s Club</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- Font -->
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
-
-  <!-- Preload root-level sprite sheets (384×96 PNGs) -->
-  <link rel="preload" as="image" href="./kessler_idle.png">
-  <link rel="preload" as="image" href="./kessler_talk.png">
-  <link rel="preload" as="image" href="./cajun_idle.png">
-  <link rel="preload" as="image" href="./cajun_talk.png">
-
   <style>
     :root{
-      --bg:#0c1220; --panel:#0f1b2e; --panel-2:#0b1320;
-      --accent:#33e1ff; --good:#5CFF7A; --bad:#ff6b6b; --text:#e9f0ff;
+      --bg:#0b1220; --panel:#0f1b2e; --panel-2:#0a1424;
+      --text:#E9F0FF; --accent:#33E1FF; --good:#78FF9F; --bad:#FF6B6B;
       --edge:#2c4166; --edge-2:#1e314f; --shadow:#070b13;
       --runway:#2ce3ff; --runway-glow:#98f6ff;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
     body{
-      margin:0; background: radial-gradient(1200px 800px at 30% -10%, #15243c, var(--bg));
-      color:var(--text);
-      font-family:"Press Start 2P",system-ui,monospace; letter-spacing:.5px;
+      margin:0; background: radial-gradient(1100px 800px at 25% -10%, #15243c, var(--bg));
+      color:var(--text); font-family:"Press Start 2P", system-ui, monospace; letter-spacing:.5px;
       display:flex; flex-direction:column; align-items:center;
     }
-    .frame{ width:min(100%, 980px); padding:16px }
+
+    .frame{ width:min(100%,1000px); padding:16px }
     .title{
-      text-align:center; font-size:clamp(18px,3.2vw,34px); margin:6px 0 10px;
-      text-shadow:0 3px 0 #000, 0 0 18px rgba(51,225,255,.25);
-      letter-spacing:2px;
+      text-align:center; font-size:clamp(18px,3.2vw,34px); margin:6px 0 12px;
+      letter-spacing:2px; text-shadow:0 3px 0 #000, 0 0 16px rgba(51,225,255,.25);
     }
 
-    /* —— LOUNGE (always-on portraits) ——————————————————— */
-    .sofa{
-      position:relative; height:172px; margin:4px 0 14px;
-      border:4px solid var(--panel-2); outline:2px solid var(--edge); border-radius:18px; overflow:hidden;
-      background:
-        linear-gradient(#1e2f4d,#142540) padding-box,
-        repeating-linear-gradient(0deg,#0b1320 0 2px,#0f1b2e 2px 4px);
-      box-shadow:0 8px 0 var(--shadow), inset 0 0 0 2px #1f2d47;
+    /* ——— Scoreboard / Avatars ——— */
+    .scorebar{
+      display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:center;
+      background:linear-gradient(#1b2844,#12243f); border:4px solid #0b1320; outline:2px solid var(--edge);
+      border-radius:16px; padding:10px 14px; box-shadow:0 8px 0 var(--shadow), inset 0 0 0 2px #1f2d47;
     }
-    .couch{
-      position:absolute; left:10px; right:10px; bottom:10px; height:78px; border-radius:16px;
-      background: linear-gradient(#7b4a1e,#5a3113); border:3px solid #2e1a0b;
-      box-shadow: inset 0 10px 0 #2c180a, 0 6px 0 rgba(0,0,0,.25);
+    .side{ display:flex; align-items:center; gap:12px }
+    .side.right{ justify-content:flex-end }
+    .avatar{
+      width:64px; height:64px; flex:0 0 64px; border-radius:14px; overflow:hidden;
+      background:linear-gradient(#22375f,#182b4a); border:2px solid #1b2f53; box-shadow: inset 0 0 0 2px #0f1e35;
+      display:grid; place-items:center;
+      transform-origin:50% 85%; /* animations pivot */
     }
-    .char{
-      position:absolute; bottom:66px; width:120px; height:120px; image-rendering:pixelated;
-      display:flex; align-items:flex-end; justify-content:center;
-      filter: drop-shadow(0 6px 0 var(--shadow));
-      transform-origin: 50% 85%;
-    }
-    .char.kessler{ left:56px }
-    .char.cajun{ right:56px }
-    .sprite{
-      width:96px; height:96px;
-      /* exact sheet size prevents sub-pixel shimmy */
-      background-size:384px 96px;
-      background-position:0 0;
-      background-repeat:no-repeat;
-      border:3px solid #1a2b4a; border-radius:10px; background-color:#132240;
-      image-rendering: pixelated;
-    }
+    .name{ font-size:12px; opacity:.9 }
+    .cash{ padding:6px 10px; border-radius:999px; border:2px solid #203354; background:#081221; font-size:12px }
+    .cash .you{ color:var(--good) } .cash .opp{ color:var(--bad) }
 
-    /* Speech bubbles */
+    /* tiny speech bubbles */
     .bubble{
-      position:absolute; bottom:118px;
-      max-width:220px; padding:6px 8px; border-radius:10px;
-      background:#081221; border:2px solid var(--edge-2);
-      box-shadow:0 3px 0 #010409; font-size:11px; opacity:0; pointer-events:none;
-      transform: translateY(8px) scale(.98);
+      position:absolute; transform: translate(-50%,-10px); left:50%; top:-6px;
+      background:#081221; border:2px solid var(--edge-2); padding:6px 8px; border-radius:10px;
+      font-size:10px; white-space:nowrap; opacity:0; pointer-events:none;
       transition: opacity .15s ease, transform .15s ease;
-      white-space:normal; line-height:1.4;
     }
-    .bubble:after{
-      content:""; position:absolute; left:18px; top:100%;
-      border:8px solid transparent; border-top-color:var(--edge-2);
-      filter: drop-shadow(0 2px 0 #010409);
+    .bubble:after{ content:""; position:absolute; left:12px; top:100%;
+      border:8px solid transparent; border-top-color:var(--edge-2); filter:drop-shadow(0 2px 0 #010409);
     }
-    .char.cajun .bubble{ right:0; left:auto; }
-    .char.cajun .bubble:after{ left:auto; right:18px }
-    .bubble.show{ opacity:1; transform: translateY(0) scale(1) }
+    .bubble.show{ opacity:1; transform: translate(-50%,-16px) }
 
-    /* Sprite-sheet animation using CSS steps; 4 frames horizontally */
-    .animate-frames{ animation: talk 0.8s steps(4) infinite }
-    @keyframes talk { from{ background-position:0 0 } to{ background-position:-384px 0 } }
-
-    /* Scene reactions */
+    /* SVG avatars react with classes */
     .lean{ animation: lean .6s ease-in-out infinite alternate }
     @keyframes lean { from{ transform:translateY(-1px) rotate(-1deg) } to{ transform:translateY(-3px) rotate(1deg) } }
     .pump{ animation: pump .55s ease-in-out 6 }
@@ -101,14 +66,12 @@
     .shake{ animation: shake .4s ease-in-out 1 }
     @keyframes shake { 0%,100%{ transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
 
-    /* —— HUD / Controls ————————————————— */
+    /* ——— Controls ——— */
     .hud{
       display:grid; grid-template-columns:1fr auto 1fr; gap:10px; align-items:center;
-      background:linear-gradient(#0c1422,#0b1320); border:4px solid var(--panel-2); outline:2px solid var(--edge);
+      margin-top:10px; background:linear-gradient(#0c1422,#0b1320); border:4px solid #0b1320; outline:2px solid var(--edge);
       padding:12px; border-radius:16px; box-shadow:0 8px 0 var(--shadow), inset 0 0 0 2px #1f2d47;
     }
-    .pill{ background:#081221; border:2px solid #203354; border-radius:999px; padding:8px 12px; font-size:12px; white-space:nowrap }
-    .val.you{ color:var(--good) } .val.opp{ color:var(--bad) }
     .controls{ display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; font-size:12px }
     .controls input[type="text"], .controls input[type="number"]{
       width:84px; text-transform:uppercase; text-align:center;
@@ -118,11 +81,11 @@
       background:linear-gradient(#17365d,#0f2745); color:#cfe6ff; box-shadow:0 4px 0 #0a1a2f, inset 0 0 0 2px #28456d }
     .btn:active{ transform:translateY(2px) }
 
-    /* —— Round / Flights ———————————————— */
+    /* ——— Round / Flights ——— */
     .arena{ margin:14px 0 10px; background:var(--panel); border:4px solid #091220; outline:2px solid var(--edge); border-radius:18px; padding:14px; box-shadow:0 8px 0 var(--shadow) }
     .flights{ display:grid; grid-template-columns:1fr 1fr; gap:12px }
     .card{
-      cursor:pointer; background:#0a1425; border:3px solid var(--edge-2); outline:2px solid var(--edge); border-radius:12px; padding:12px;
+      cursor:pointer; background:var(--panel-2); border:3px solid var(--edge-2); outline:2px solid var(--edge); border-radius:12px; padding:12px;
       min-height:118px; transition:filter .1s, transform .05s;
       box-shadow: inset 0 0 0 2px #0f1e35;
     }
@@ -137,8 +100,6 @@
     .log{ margin-top:12px; font-size:12px; min-height:22px; opacity:.95; text-align:center }
 
     @media (max-width:720px){
-      .char{ width:100px; height:100px; bottom:62px }
-      .sprite{ width:84px; height:84px; background-size:336px 84px }
       .flights{ grid-template-columns:1fr }
     }
   </style>
@@ -147,21 +108,41 @@
   <div class="frame">
     <div class="title">DIPLOMAT’S CLUB</div>
 
-    <!-- Always-on character row -->
-    <div class="sofa" aria-hidden="true" id="sofa">
-      <div class="char kessler" id="charK">
-        <div id="sprK" class="sprite"></div>
-        <div class="bubble" id="bubbleK"></div>
+    <!-- Scorebar with minimal SVG avatars -->
+    <div class="scorebar" id="sofa">
+      <div class="side">
+        <div class="avatar" id="charK">
+          <!-- Kessler: hair silhouette + jacket (pure SVG) -->
+          <svg viewBox="0 0 64 64" width="48" height="48" aria-hidden="true">
+            <rect x="0" y="0" width="64" height="64" rx="10" fill="#182a48"/>
+            <path d="M34 8c-8 2-10 8-10 14v6h16v-4c0-6 4-10 4-12-2-4-6-5-10-4z" fill="#141824"/>
+            <circle cx="32" cy="28" r="10" fill="#f4c7a0"/>
+            <rect x="18" y="40" width="28" height="16" rx="4" fill="#6e4e1e" />
+            <rect x="30" y="40" width="4" height="16" fill="#142440"/>
+          </svg>
+          <div class="bubble" id="bubbleK"></div>
+        </div>
+        <div class="name">KESSLER</div>
       </div>
-      <div class="char cajun" id="charT">
-        <div id="sprT" class="sprite"></div>
-        <div class="bubble" id="bubbleT"></div>
+      <div class="side right">
+        <div class="name">THE CAJUN</div>
+        <div class="avatar" id="charT">
+          <!-- Cajun: oversized foam hat -->
+          <svg viewBox="0 0 64 64" width="48" height="48" aria-hidden="true">
+            <rect x="0" y="0" width="64" height="64" rx="10" fill="#182a48"/>
+            <path d="M32 6c-7 0-12 7-12 16h24C44 13 39 6 32 6z" fill="#e8d1a8"/>
+            <rect x="10" y="20" width="44" height="8" rx="4" fill="#d8bf94"/>
+            <circle cx="32" cy="30" r="9" fill="#f6c8a0"/>
+            <rect x="20" y="40" width="28" height="16" rx="4" fill="#32528a" />
+            <rect x="30" y="40" width="4" height="16" fill="#0f1f3b"/>
+          </svg>
+          <div class="bubble" id="bubbleT"></div>
+        </div>
       </div>
-      <div class="couch"></div>
     </div>
 
     <div class="hud">
-      <div class="pill">KESSLER: <span id="youCash" class="val you">$500</span></div>
+      <div class="cash">KESSLER: <span id="youCash" class="you">$500</span></div>
       <div class="controls">
         <label style="display:flex;align-items:center;gap:8px;font-size:10px;opacity:.9">
           <input id="liveToggle" type="checkbox"/> LIVE Airport
@@ -171,10 +152,10 @@
         <button id="deal" class="btn">Deal flights</button>
         <button id="reset" class="btn">Reset</button>
       </div>
-      <div class="pill">THE CAJUN: <span id="oppCash" class="val opp">$2000</span></div>
+      <div class="cash">THE CAJUN: <span id="oppCash" class="opp">$2,000</span></div>
     </div>
 
-    <div class="arena" id="arena">
+    <div class="arena">
       <div class="flights">
         <div id="A" class="card">
           <div class="line" id="lineA">A — waiting…</div>
@@ -187,7 +168,7 @@
           <div class="progress"><div id="barB" class="bar"></div></div>
         </div>
       </div>
-      <div class="log" id="log">Deal, then tap A or B to bet winner-takes-all.</div>
+      <div class="log" id="log">Deal, then click A or B to bet winner-takes-all.</div>
     </div>
   </div>
 
