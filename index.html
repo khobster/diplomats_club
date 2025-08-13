@@ -4,7 +4,16 @@
   <meta charset="utf-8" />
   <title>Diplomat’s Club</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Font -->
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+
+  <!-- Preload root-level sprite sheets (384×96 PNGs) -->
+  <link rel="preload" as="image" href="./kessler_idle.png">
+  <link rel="preload" as="image" href="./kessler_talk.png">
+  <link rel="preload" as="image" href="./cajun_idle.png">
+  <link rel="preload" as="image" href="./cajun_talk.png">
+
   <style>
     :root{
       --bg:#10151f; --panel:#0f1b2e; --accent:#33e1ff; --good:#5CFF7A; --bad:#ff6b6b;
@@ -20,7 +29,7 @@
     .frame{ width:min(100%, 980px); padding:12px }
     .title{ text-align:center; font-size:clamp(16px,3vw,28px); margin:10px 0 6px; text-shadow:0 3px 0 #000 }
 
-    /* —— SOFA ——————————————————— */
+    /* —— SOFA (always-on portraits) ——————————————————— */
     .sofa{
       position:relative; height:160px; margin:8px 0 12px;
       border:4px solid #0b1320; outline:2px solid #2c4166; border-radius:18px; overflow:hidden;
@@ -46,7 +55,7 @@
     /* Sprite-sheet animation using CSS steps; each sheet is 4 frames horizontally */
     .animate-frames{ animation: play 0.8s steps(4) infinite }
     @keyframes play { from{ background-position:0 0 } to{ background-position:-384px 0 } }
-    /* Idle bob and little hat wobble */
+    /* Idle bob / reactions */
     .bob{ animation: bob 2s ease-in-out infinite }
     @keyframes bob { 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(-3px) } }
     .cheer{ animation: cheer .55s ease-in-out 6 }
@@ -60,7 +69,7 @@
       background:linear-gradient(#0c1422,#0b1320); border:4px solid #0b1320; outline:2px solid #30425f;
       padding:10px; border-radius:16px; box-shadow:0 8px 0 #070b13, inset 0 0 0 2px #1f2d47;
     }
-    .pill{ background:#081221; border:2px solid #203354; border-radius:999px; padding:8px 12px; font-size:12px }
+    .pill{ background:#081221; border:2px solid #203354; border-radius:999px; padding:8px 12px; font-size:12px; white-space:nowrap }
     .val.you{ color:var(--good) } .val.opp{ color:var(--bad) }
     .controls{ display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; font-size:12px }
     .controls input[type="text"], .controls input[type="number"]{
