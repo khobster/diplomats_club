@@ -1,4 +1,4 @@
-/* Diplomat’s Club — richer scene animations + stronger UI feel */
+/* Diplomat’s Club — sprite-free UI (SVG avatars), simpler + snappier */
 
 /* ========= Configure this once you deploy your Lambda proxy ========= */
 const LIVE_PROXY = "YOUR_API_GATEWAY_URL"; // e.g., https://abc123.execute-api.us-east-1.amazonaws.com
@@ -8,14 +8,6 @@ const START_YOU = 500;
 const START_TEXAN = 2000;
 const ROUND_MS = 6500;
 const MIN_BET = 25;
-
-/* Root-level sprite files (384x96 PNGs, 4 frames horizontally) */
-const ASSET = {
-  k_idle: "./kessler_idle.png",
-  k_talk: "./kessler_talk.png",
-  c_idle: "./cajun_idle.png",
-  c_talk: "./cajun_talk.png",
-};
 
 const S = {
   you: START_YOU, opp: START_TEXAN,
@@ -30,16 +22,15 @@ const lineA=$("#lineA"), lineB=$("#lineB"), etaA=$("#etaA"), etaB=$("#etaB");
 const barA=$("#barA"), barB=$("#barB");
 const dealBtn=$("#deal"), resetBtn=$("#reset"), airport=$("#airport"), betIn=$("#betIn");
 const cardA=$("#A"), cardB=$("#B"), liveToggle=$("#liveToggle");
-const sprK=$("#sprK"), sprT=$("#sprT");
 const charK=$("#charK"), charT=$("#charT");
 const bubbleK=$("#bubbleK"), bubbleT=$("#bubbleT");
-const arena=$("#arena"), sofa=$("#sofa");
+const sofa=$("#sofa");
 
 /* ------- Utils ------- */
 const fmtCash = n => "$"+n.toLocaleString();
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 const setLog = t => log.textContent = t;
-const cityFrom = code => code; // simple, readable chant; swap to a map later if desired
+const chantFrom = code => `C’mon ${code.toUpperCase()}, let’s go!`;
 
 function updateHUD(){
   youCash.textContent = fmtCash(S.you);
@@ -55,33 +46,15 @@ function showBubble(el, text, ms=1500){
   const id = setTimeout(()=>el.classList.remove("show"), ms);
   return ()=>clearTimeout(id);
 }
-
-function setSpritesIdle(){
-  // Still portraits (no frame cycling)
-  sprK.style.backgroundImage = `url(${ASSET.k_idle})`;
-  sprT.style.backgroundImage = `url(${ASSET.c_idle})`;
-  sprK.style.backgroundPosition = "0px 0px";
-  sprT.style.backgroundPosition = "0px 0px";
-  sprK.classList.remove("animate-frames");
-  sprT.classList.remove("animate-frames");
-}
-function talk(){
-  // Turn on animation only during the talk burst
-  sprK.style.backgroundImage = `url(${ASSET.k_talk})`;
-  sprT.style.backgroundImage = `url(${ASSET.c_talk})`;
-  sprK.style.backgroundPosition = "0px 0px";
-  sprT.style.backgroundPosition = "0px 0px";
-  sprK.classList.add("animate-frames");
-  sprT.classList.add("animate-frames");
-  setTimeout(setSpritesIdle, 900);
-}
+function leanOn(){ charK.classList.add("lean"); charT.classList.add("lean"); }
+function leanOff(){ charK.classList.remove("lean"); charT.classList.remove("lean"); }
 function pump(el){ el.classList.add("pump"); setTimeout(()=>el.classList.remove("pump"), 1100); }
 function slump(el){ el.classList.add("slump"); setTimeout(()=>el.classList.remove("slump"), 900); }
 function shake(el){ el.classList.add("shake"); setTimeout(()=>el.classList.remove("shake"), 450); }
 
 /* ------- Flight sources ------- */
 function simFlights(iata){
-  const cities=["PIT","YYZ","ORD","DFW","MIA","ATL","DTW","BOS","IAD","LAX","SEA","DEN","SFO","PHX","CLT","MSP","PHL","BNA","BWI","HOU","LAS","SLC","RDU","STL","CMH","CLE","MCI"];
+  const cities=["PIT","YYZ","ORD","DFW","MIA","ATL","DTW","BOS","IAD","LAX","SEA","DEN","SFO","PHX","CLT","MSP","PHL","BNA","BWI","HOU","LAS","SLC","RDU","STL","CMH","CLE","MCI","AUS","SAN","SMF"];
   const r=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
   const p=()=>({origin:cities[r(0,cities.length-1)],dest:iata,etaMinutes:r(3,14),callsign:`${iata}${r(100,999)}`});
   let A=p(),B=p(); if(B.origin===A.origin) B.origin=cities[(cities.indexOf(A.origin)+3)%cities.length];
@@ -116,12 +89,10 @@ async function deal(){
   lineB.textContent=`B — ${d.B.origin} → ${d.B.dest} (${d.B.callsign})`;
   etaA.textContent=`ETA ~ ${d.A.etaMinutes} min`; etaB.textContent=`ETA ~ ${d.B.etaMinutes} min`;
 
-  // Conversational pop + quick talk frames
-  setSpritesIdle(); talk();
   showBubble(bubbleK, "New action!");
   showBubble(bubbleT, "Name your flight!");
   updateHUD();
-  setLog("Tap A or B to place your bet (winner takes all).");
+  setLog("Click A or B to place your bet (winner takes all).");
 }
 
 function start(choice){
@@ -133,12 +104,8 @@ function start(choice){
   cardA.classList.toggle("selected", choice==='A');
   cardB.classList.toggle("selected", choice==='B');
 
-  const chant = `C’mon ${cityFrom(pick.origin)}, let’s go!`;
-  showBubble(bubbleK, chant, 1800);
-
-  // Both lean in while the race runs
-  charK.classList.add("lean"); charT.classList.add("lean");
-
+  showBubble(bubbleK, chantFrom(pick.origin), 1800);
+  leanOn();
   setLog(`You bet ${fmtCash(S.bet)} on Flight ${choice}.`);
 
   const {A,B}=S.dealt, a=A.etaMinutes, b=B.etaMinutes, total=ROUND_MS;
@@ -160,27 +127,26 @@ function resolve(){
   const winner = (A.etaMinutes===B.etaMinutes) ? (Math.random()<.5?'A':'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
   const youWon = (S.chosen===winner);
 
-  // Stop leaning
-  charK.classList.remove("lean"); charT.classList.remove("lean");
+  leanOff();
 
   if(youWon){
     S.you+=S.bet; S.opp-=S.bet;
     setLog(`WIN! Flight ${winner} first — ${fmtCash(S.bet)} to you.`);
     pump(charK); slump(charT); shake(sofa);
-    showBubble(bubbleK, "YES!", 1000);
-    showBubble(bubbleT, "Dang.", 1000);
+    showBubble(bubbleK, "YES!", 900);
+    showBubble(bubbleT, "Dang.", 900);
   }else{
     S.you-=S.bet; S.opp+=S.bet;
     setLog(`Lost. Flight ${winner} beat your pick — ${fmtCash(S.bet)} to the Cajun.`);
     pump(charT); slump(charK); shake(sofa);
-    showBubble(bubbleT, "HA!", 1000);
-    showBubble(bubbleK, "Nooo!", 1000);
+    showBubble(bubbleT, "HA!", 900);
+    showBubble(bubbleK, "Nooo!", 900);
   }
   S.bet = clamp(S.bet, MIN_BET, Math.min(S.you,S.opp));
   S.racing=false; updateHUD();
 
   if(S.you<=0){ setLog("Busted! Refresh to try again."); }
-  if(S.opp<=0){ setLog("You cleaned him out! The Cajun tips his giant hat."); }
+  if(S.opp<=0){ setLog("You cleaned him out! The Cajun tips his hat."); }
 }
 
 /* ------- Events ------- */
@@ -194,5 +160,4 @@ liveToggle.addEventListener("change", e=>{ S.live=e.target.checked; setLog(S.liv
 
 /* Init */
 updateHUD();
-setSpritesIdle();
-setLog("Welcome to the Diplomat’s Club. Deal flights to start."); 
+setLog("Welcome to the Diplomat’s Club. Deal flights to start.");
