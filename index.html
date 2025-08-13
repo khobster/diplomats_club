@@ -48,16 +48,21 @@
     }
     .char.kessler{ left:48px }
     .char.cajun{ right:48px }
+
     .sprite{
-      width:96px; height:96px; background-size:cover; background-repeat:no-repeat;
+      width:96px; height:96px;
+      /* Critical: exact sheet size to prevent sub-pixel “shimmy” */
+      background-size:384px 96px;
+      background-position:0 0;
+      background-repeat:no-repeat;
       border:3px solid #1a2b4a; border-radius:10px; background-color:#132240;
+      image-rendering: pixelated;
     }
     /* Sprite-sheet animation using CSS steps; each sheet is 4 frames horizontally */
     .animate-frames{ animation: play 0.8s steps(4) infinite }
     @keyframes play { from{ background-position:0 0 } to{ background-position:-384px 0 } }
-    /* Idle bob / reactions */
-    .bob{ animation: bob 2s ease-in-out infinite }
-    @keyframes bob { 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(-3px) } }
+
+    /* Reactions (used on win/lose only) */
     .cheer{ animation: cheer .55s ease-in-out 6 }
     @keyframes cheer { 0%{ transform:translateY(0) } 50%{ transform:translateY(-10px) } 100%{ transform:translateY(0) } }
     .sad{ animation: sad .7s ease-in-out 3 }
@@ -98,7 +103,7 @@
 
     @media (max-width:720px){
       .char{ width:100px; height:100px; bottom:58px }
-      .sprite{ width:84px; height:84px }
+      .sprite{ width:84px; height:84px; background-size:336px 84px }
       .flights{ grid-template-columns:1fr }
     }
   </style>
@@ -107,12 +112,12 @@
   <div class="frame">
     <div class="title">DIPLOMAT’S CLUB</div>
 
-    <!-- Always-on character row -->
+    <!-- Always-on character row (no idle bob; perfectly still by default) -->
     <div class="sofa" aria-hidden="true">
-      <div class="char kessler bob">
+      <div class="char kessler">
         <div id="sprK" class="sprite"></div>
       </div>
-      <div class="char cajun bob">
+      <div class="char cajun">
         <div id="sprT" class="sprite"></div>
       </div>
       <div class="couch"></div>
