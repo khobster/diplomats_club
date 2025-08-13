@@ -1,4 +1,4 @@
-/* Diplomat’s Club — simplified UI + always-on portraits (root-level assets) */
+/* Diplomat’s Club — portraits stay still on idle; animate only while “talking” */
 
 /* ========= Configure this once you deploy your Lambda proxy ========= */
 const LIVE_PROXY = "YOUR_API_GATEWAY_URL"; // e.g., https://abc123.execute-api.us-east-1.amazonaws.com
@@ -49,15 +49,22 @@ function updateHUD(){
 
 /* ------- Sprites ------- */
 function setSpritesIdle(){
+  // Still portraits (no frame cycling)
   sprK.style.backgroundImage = `url(${ASSET.k_idle})`;
   sprT.style.backgroundImage = `url(${ASSET.c_idle})`;
-  sprK.classList.add("animate-frames");
-  sprT.classList.add("animate-frames");
+  sprK.style.backgroundPosition = "0px 0px";
+  sprT.style.backgroundPosition = "0px 0px";
+  sprK.classList.remove("animate-frames");
+  sprT.classList.remove("animate-frames");
 }
 function talk(){
+  // Turn on animation only during the talk burst
   sprK.style.backgroundImage = `url(${ASSET.k_talk})`;
   sprT.style.backgroundImage = `url(${ASSET.c_talk})`;
-  // swap back after a moment
+  sprK.style.backgroundPosition = "0px 0px";
+  sprT.style.backgroundPosition = "0px 0px";
+  sprK.classList.add("animate-frames");
+  sprT.classList.add("animate-frames");
   setTimeout(setSpritesIdle, 900);
 }
 function cheer(el){ el.classList.add("cheer"); setTimeout(()=>el.classList.remove("cheer"), 1200); }
