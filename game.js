@@ -1,216 +1,121 @@
-/* ================================
-   Diplomat’s Club — Game Logic
-   Repository: diplomats_club (GitHub Pages)
-   Author: you + ChatGPT
-   ================================= */
+/* Diplomat’s Club — simplified UI + always-on portraits */
 
-/* --------- Config --------- */
-const START_YOU = 500;
-const START_TEXAN = 2000;
+const LIVE_PROXY = "YOUR_API_GATEWAY_URL/proxy"; // set after Lambda deploy
+const START_YOU = 500, START_TEXAN = 2000;
+const ROUND_MS = 6500;
 const MIN_BET = 25;
-const MAX_MINUTES = 14; // simulated ETA window (3..14 min)
-const MIN_MINUTES = 3;
-const ROUND_SPEED = 6500; // ms that our "race" visualization runs
-const LIVE_PROXY = "YOUR_PROXY_URL/api/flights"; // <-- fill when adding live data
 
-/* --------- State --------- */
 const S = {
-  you: START_YOU,
-  opp: START_TEXAN,
-  bet: 50,
-  airport: "JFK",
-  dealt: null,     // {A:{...}, B:{...}}
-  chosen: null,    // 'A' or 'B'
-  racing: false,
-  liveMode: false
+  you: START_YOU, opp: START_TEXAN,
+  bet: 50, airport: "JFK",
+  dealt: null, racing: false, chosen: null, live:false
 };
 
-/* --------- DOM --------- */
-const $ = sel => document.querySelector(sel);
-const youCash = $("#youCash");
-const oppCash = $("#oppCash");
-const betAmt  = $("#betAmt");
-const logEl   = $("#log");
-const lineA   = $("#lineA");
-const lineB   = $("#lineB");
-const etaA    = $("#etaA");
-const etaB    = $("#etaB");
-const barA    = $("#barA");
-const barB    = $("#barB");
-const dealBtn = $("#deal");
-const nextBtn = $("#nextRound");
-const airport = $("#airport");
-const betA    = $("#betA");
-const betB    = $("#betB");
-const liveToggle = $("#liveToggle");
-const chips = [...document.querySelectorAll(".chip")];
+const $ = s => document.querySelector(s);
+const youCash=$("#youCash"), oppCash=$("#oppCash"), log=$("#log");
+const lineA=$("#lineA"), lineB=$("#lineB"), etaA=$("#etaA"), etaB=$("#etaB");
+const barA=$("#barA"), barB=$("#barB");
+const dealBtn=$("#deal"), resetBtn=$("#reset"), airport=$("#airport"), betIn=$("#betIn");
+const cardA=$("#A"), cardB=$("#B"), liveToggle=$("#liveToggle");
+const sprK=$("#sprK"), sprT=$("#sprT");
 
-/* --------- Utils --------- */
-const cities = [
-  "PIT","YYZ","ORD","DFW","MIA","ATL","DTW","BOS","IAD","LAX",
-  "PHX","CLT","SEA","DEN","SFO","MSP","PHL","BNA","BWI","HOU",
-  "YUL","YOW","YVR","LAS","SLC","RDU","STL","CMH","CLE","MCI"
-];
-const destNames = { "JFK":"New York", "EWR":"Newark", "LGA":"New York", "DEN":"Denver", "LAX":"Los Angeles" };
-
-const fmtCash = n => "$" + n.toLocaleString();
-function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+function fmtCash(n){ return "$"+n.toLocaleString(); }
+function clamp(v,lo,hi){ return Math.max(lo, Math.min(hi, v)); }
+function setLog(t){ log.textContent=t; }
 
 function updateHUD(){
   youCash.textContent = fmtCash(S.you);
   oppCash.textContent = fmtCash(S.opp);
-  betAmt.textContent  = fmtCash(S.bet);
+  betIn.value = S.bet;
   airport.value = S.airport;
-  betA.disabled = !S.dealt || S.racing;
-  betB.disabled = !S.dealt || S.racing;
-  nextBtn.disabled = S.racing || !S.dealt;
 }
 
-/* --------- Flight Generation (Sim Mode) --------- */
-function randomInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
+function setSpritesIdle(){
+  // Set your sheet files here (4 frames, 96x96 each, laid out horizontally)
+  sprK.style.backgroundImage = "url('./sprites/kessler_idle.png')";
+  sprT.style.backgroundImage = "url('./sprites/cajun_idle.png')";
+  sprK.classList.add("animate-frames"); sprT.classList.add("animate-frames");
+}
+function talk(which=true){
+  // Swap to talk sheets briefly
+  sprK.style.backgroundImage = "url('./sprites/kessler_talk.png')";
+  sprT.style.backgroundImage = "url('./sprites/cajun_talk.png')";
+  setTimeout(setSpritesIdle, which? 900: 700);
+}
+function cheer(win){ win.classList.add("cheer"); setTimeout(()=>win.classList.remove("cheer"), 1200); }
+function sad(lose){ lose.classList.add("sad"); setTimeout(()=>lose.classList.remove("sad"), 1200); }
+
 function simFlights(iata){
-  const pick = () => {
-    const origin = cities[randomInt(0, cities.length-1)];
-    const mins   = randomInt(MIN_MINUTES, MAX_MINUTES);
-    const distNm = randomInt(120, 1500); // nautical miles (just for flavor)
-    return {
-      origin,
-      dest: iata,
-      etaMinutes: mins,
-      distanceNm: distNm,
-      callsign: `${origin}${randomInt(100, 999)}`
-    };
-  };
-  let A = pick(), B = pick();
-  // avoid two identical origins for variety
-  if (B.origin === A.origin) B.origin = cities[(cities.indexOf(A.origin)+3)%cities.length];
-  return { A, B };
+  const cities=["PIT","YYZ","ORD","DFW","MIA","ATL","DTW","BOS","IAD","LAX","SEA","DEN","SFO","PHX","CLT","MSP","PHL","BNA","BWI","HOU"];
+  const r=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
+  const p=()=>({origin:cities[r(0,cities.length-1)],dest:iata,etaMinutes:r(3,14),callsign:`${iata}${r(100,999)}`});
+  let A=p(),B=p(); if(B.origin===A.origin) B.origin=cities[(cities.indexOf(A.origin)+3)%cities.length];
+  return {A,B};
 }
 
-/* --------- LIVE Mode adapter (serverless proxy) --------- */
-/*
-  Your proxy should return:
-  { A: {origin, dest, etaMinutes, distanceNm, callsign},
-    B: {origin, dest, etaMinutes, distanceNm, callsign} }
-*/
 async function liveFlights(iata){
   const url = `${LIVE_PROXY}?airport=${encodeURIComponent(iata)}`;
-  const r = await fetch(url, { cache:"no-store" });
-  if(!r.ok) throw new Error("Live proxy failed");
-  return await r.json();
+  const r = await fetch(url, {cache:"no-store"});
+  if(!r.ok) throw new Error("proxy failed");
+  return await r.json(); // {A:{origin,dest,etaMinutes,callsign}, B:{...}}
 }
-
-/* --------- Round Flow --------- */
-function setLog(t){ logEl.textContent = t; }
 
 async function deal(){
-  if (S.racing) return;
-  S.airport = (airport.value || "JFK").toUpperCase();
-  lineA.textContent = "Dealing flights…";
-  lineB.textContent = "Dealing flights…";
-  etaA.textContent = ""; etaB.textContent = "";
-  barA.style.width = "0%"; barB.style.width = "0%";
-  setLog("Picking two in-air arrivals…");
-
+  if(S.racing) return;
+  S.airport = (airport.value||"JFK").toUpperCase();
+  lineA.textContent="Dealing…"; lineB.textContent="Dealing…"; etaA.textContent=""; etaB.textContent="";
+  barA.style.width="0%"; barB.style.width="0%";
+  setLog(S.live? "Pulling two inbound real flights…" : "Drawing two simulated inbound flights…");
   try{
-    S.dealt = S.liveMode ? await liveFlights(S.airport) : simFlights(S.airport);
+    S.dealt = S.live ? await liveFlights(S.airport) : simFlights(S.airport);
   }catch(e){
-    console.warn(e);
-    S.dealt = simFlights(S.airport);
-    setLog("Live Mode unavailable. Using simulated flights this round.");
+    console.warn(e); S.dealt = simFlights(S.airport);
+    setLog("Live unavailable—using simulated flights this round.");
   }
-
-  const d = S.dealt;
-  lineA.textContent = `A — ${d.A.origin} → ${d.A.dest}  (${d.A.callsign})`;
-  lineB.textContent = `B — ${d.B.origin} → ${d.B.dest}  (${d.B.callsign})`;
-  const destName = destNames[d.A.dest] || d.A.dest;
-  etaA.textContent = `ETA ~ ${d.A.etaMinutes} min to ${destName}`;
-  etaB.textContent = `ETA ~ ${d.B.etaMinutes} min to ${destName}`;
-
-  S.chosen = null;
-  updateHUD();
-  setLog("Choose Flight A or B, then watch the race.");
+  const d=S.dealt;
+  lineA.textContent=`A — ${d.A.origin} → ${d.A.dest} (${d.A.callsign})`;
+  lineB.textContent=`B — ${d.B.origin} → ${d.B.dest} (${d.B.callsign})`;
+  etaA.textContent=`ETA ~ ${d.A.etaMinutes} min`; etaB.textContent=`ETA ~ ${d.B.etaMinutes} min`;
+  setSpritesIdle(); talk(); updateHUD();
+  setLog("Tap A or B to place your bet (winner takes all).");
 }
 
-function adjustBet(delta){
-  if(delta === 0){ // ALL-IN
-    S.bet = Math.min(S.you, S.opp); updateHUD(); return;
+function start(choice){
+  if(!S.dealt||S.racing) return;
+  S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, Math.min(S.you,S.opp));
+  S.chosen=choice; S.racing=true; setLog(`You bet ${fmtCash(S.bet)} on Flight ${choice}.`);
+  const {A,B}=S.dealt, a=A.etaMinutes, b=B.etaMinutes, total=ROUND_MS;
+  const start=performance.now();
+  const Ams = total * (a/(a+b)), Bms = total * (b/(a+b));
+
+  function step(now){
+    const t=now-start;
+    barA.style.width = Math.min(100, (t/Ams)*100).toFixed(1)+"%";
+    barB.style.width = Math.min(100, (t/Bms)*100).toFixed(1)+"%";
+    if(t<Ams || t<Bms) requestAnimationFrame(step);
+    else resolve();
   }
-  S.bet = clamp(S.bet + Number(delta), MIN_BET, Math.min(S.you, S.opp));
-  updateHUD();
+  requestAnimationFrame(step);
 }
 
-function startRace(choice){
-  if(!S.dealt) return;
-  S.chosen = choice; S.racing = true;
-  betA.disabled = betB.disabled = true; nextBtn.disabled = true;
-  setLog(`You bet ${fmtCash(S.bet)} on Flight ${choice}. Wheels up…`);
-
-  // convert ETA to animation rate
-  const d = S.dealt;
-  const etaAms = Math.max(1, d.A.etaMinutes);
-  const etaBms = Math.max(1, d.B.etaMinutes);
-  const totalMs = ROUND_SPEED; // normalized visual duration
-
-  const start = performance.now();
-  function tick(now){
-    const t = now - start;
-    const pA = clamp(t / (totalMs * (etaAms / (etaAms + etaBms))), 0, 1);
-    const pB = clamp(t / (totalMs * (etaBms / (etaAms + etaBms))), 0, 1);
-    barA.style.width = (pA*100).toFixed(1) + "%";
-    barB.style.width = (pB*100).toFixed(1) + "%";
-
-    if(pA < 1 || pB < 1){
-      requestAnimationFrame(tick);
-    }else{
-      resolveRound();
-    }
-  }
-  requestAnimationFrame(tick);
+function resolve(){
+  const {A,B}=S.dealt;
+  const winner = (A.etaMinutes===B.etaMinutes) ? (Math.random()<.5?'A':'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
+  const youWon = (S.chosen===winner);
+  if(youWon){ S.you+=S.bet; S.opp-=S.bet; setLog(`WIN! Flight ${winner} first — ${fmtCash(S.bet)} to you.`); cheer(document.querySelector('.char.kessler')); sad(document.querySelector('.char.cajun')); }
+  else     { S.you-=S.bet; S.opp+=S.bet; setLog(`Lost. Flight ${winner} beat your pick — ${fmtCash(S.bet)} to the Cajun.`); cheer(document.querySelector('.char.cajun')); sad(document.querySelector('.char.kessler')); }
+  S.bet = clamp(S.bet, MIN_BET, Math.min(S.you,S.opp));
+  S.racing=false; updateHUD();
+  if(S.you<=0){ setLog("Busted! Refresh to try again."); }
+  if(S.opp<=0){ setLog("You cleaned him out! The Cajun tips his giant hat."); }
 }
 
-function resolveRound(){
-  const d = S.dealt;
-  const winner = d.A.etaMinutes === d.B.etaMinutes
-    ? (Math.random()<.5 ? 'A':'B')
-    : (d.A.etaMinutes < d.B.etaMinutes ? 'A':'B');
-
-  const youWon = (S.chosen === winner);
-  if(youWon){
-    S.you += S.bet;
-    S.opp -= S.bet;
-    setLog(`WIN! Flight ${winner} landed first. You won ${fmtCash(S.bet)}.`);
-  }else{
-    S.you -= S.bet;
-    S.opp += S.bet;
-    setLog(`Lost. Flight ${winner} beat your pick. You lost ${fmtCash(S.bet)}.`);
-  }
-  S.bet = clamp(S.bet, MIN_BET, Math.min(S.you, S.opp));
-  S.racing = false;
-  updateHUD();
-
-  if(S.you <= 0){
-    setLog("Broke! The Texan walks away grinning. Refresh to try again.");
-    dealBtn.disabled = betA.disabled = betB.disabled = nextBtn.disabled = true;
-  }else if(S.opp <= 0){
-    setLog("YOU CLEANED HIM OUT! The Texan tips his hat in defeat.");
-    dealBtn.disabled = betA.disabled = betB.disabled = nextBtn.disabled = true;
-  }else{
-    nextBtn.disabled = false;
-  }
-}
-
-/* --------- Wire UI --------- */
 dealBtn.addEventListener("click", deal);
-nextBtn.addEventListener("click", deal);
-betA.addEventListener("click", () => startRace('A'));
-betB.addEventListener("click", () => startRace('B'));
-chips.forEach(c => c.addEventListener("click", () => adjustBet(Number(c.dataset.add))));
-airport.addEventListener("change", () => { S.airport = airport.value.toUpperCase(); });
-liveToggle.addEventListener("change", e => {
-  S.liveMode = e.target.checked;
-  setLog(S.liveMode ? "Live Mode ON — requires proxy. If unavailable, sim will auto-fallback." : "Live Mode OFF — using simulated flights.");
-});
+resetBtn.addEventListener("click", ()=>{ Object.assign(S,{you:START_YOU,opp:START_TEXAN,bet:50}); updateHUD(); setLog("Bank reset."); });
+cardA.addEventListener("click", ()=> start('A'));
+cardB.addEventListener("click", ()=> start('B'));
+airport.addEventListener("change", ()=> S.airport=airport.value.toUpperCase());
+betIn.addEventListener("change", ()=> S.bet=clamp(Number(betIn.value||MIN_BET),MIN_BET,Math.min(S.you,S.opp)));
+liveToggle.addEventListener("change", e=>{ S.live=e.target.checked; setLog(S.live?"LIVE mode ON (via Lambda)":"Simulated mode"); });
 
-updateHUD();
-setLog("Welcome to the Diplomat’s Club. Hit ‘Deal Flights’.");
+updateHUD(); setSpritesIdle();
