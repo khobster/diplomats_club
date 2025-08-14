@@ -13,7 +13,7 @@ const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/fligh
 let db = null, roomId = null, seat = "Solo";   // "K" | "C" | "Solo"
 let roomRef = null, unsubRoom = null;
 
-/* DOM helpers */
+/* -------- DOM helpers -------- */
 function byId(id){ return document.getElementById(id); }
 const setLog = (t)=> byId("log").textContent = t;
 function toast(t){ setLog(t); }
@@ -27,7 +27,7 @@ function randomCode(n=6){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Arr
 function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
 function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
 
-/* -------- Firebase init (force long-poll + smoke test) -------- */
+/* -------- Firebase init (idempotent; long-poll fallback; probe) -------- */
 (function initFirebase(){
   try{
     const cfg = window.FIREBASE_CONFIG;
@@ -35,31 +35,37 @@ function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Caj
       console.warn("[DL] No FIREBASE_CONFIG; rooms disabled.");
       return;
     }
-    if (!firebase.apps.length) firebase.initializeApp(cfg); // compat init
+    // init app once
+    if (!firebase.apps.length) firebase.initializeApp(cfg);
 
-    // Force long-polling to avoid 400 Write/channel issues (ad blockers/VPN)
-    const dbTmp = firebase.firestore();
-    try {
-      dbTmp.settings({ experimentalForceLongPolling: true, useFetchStreams: false });
-      try { firebase.firestore.setLogLevel('error'); } catch {}
-    } catch(e) {
-      console.warn("[DL] db.settings warn (ok on some SDKs):", e);
+    // get Firestore and apply settings ONCE per page (prevents override warnings)
+    db = firebase.firestore();
+    if (!window.__DL_FS_SETTINGS_APPLIED__) {
+      try {
+        db.settings({
+          experimentalAutoDetectLongPolling: true,   // auto-fallback if stream is blocked
+          useFetchStreams: false
+        });
+      } catch (e) {
+        console.warn("[DL] db.settings warn (ok on some SDKs):", e);
+      }
+      window.__DL_FS_SETTINGS_APPLIED__ = true;
     }
-    db = dbTmp;
+    try { firebase.firestore.setLogLevel('error'); } catch {}
+
     console.log("[DL] Firebase connected:", firebase.app().options.projectId);
 
-    // Smoke test write so button can warn immediately if blocked
+    // Smoke test: if this fails, "New room" won't work either.
     db.collection("_probe").doc("w").set({t: Date.now()})
       .then(()=>console.log("[DL] Firestore write probe: OK"))
       .catch(e=>{
         console.error("[DL] Firestore write probe FAILED", e);
         alert(
-          "Firestore connection is being blocked (400 Write/channel).\n\n" +
-          "Quick fixes:\n" +
-          "1) Serve the site via http://localhost (not file://)\n" +
-          "   e.g., `npx http-server -p 5500`\n" +
-          "2) Disable ad-block/VPN for *.googleapis.com\n" +
-          "3) Try a fresh Chrome profile or Incognito (no extensions)"
+          "Firestore connection looks blocked (those 400 Write/channel errors).\n\n" +
+          "Fixes to try:\n" +
+          "• Use http://localhost (not file://)\n" +
+          "• Disable ad-block/VPN for *.googleapis.com or try Incognito\n" +
+          "• Different browser/profile or network"
         );
       });
   }catch(e){
@@ -68,12 +74,12 @@ function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Caj
   }
 })();
 
-/* Room doc shape:
-   rooms/{roomId} = {
-     createdAt, seats:{K:"", C:""}, bank:{K:500,C:2000},
-     airport:"JFK", bet:50, live:false, dealt:null, destPos:null,
-     racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
-   }
+/* -------- Rooms --------
+rooms/{roomId} = {
+  createdAt, seats:{K:"", C:""}, bank:{K:500,C:2000},
+  airport:"JFK", bet:50, live:false, dealt:null, destPos:null,
+  racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
+}
 */
 async function ensureRoom(){
   if(!db) return null;
@@ -86,7 +92,7 @@ async function ensureRoom(){
   // Create if missing
   let snap = null;
   try { snap = await roomRef.get(); }
-  catch(e){ console.error("room get failed:", e); }
+  catch(e){ console.error("[DL] room get failed:", e); }
   if(!snap || !snap.exists){
     try{
       await roomRef.set({
@@ -97,7 +103,7 @@ async function ensureRoom(){
         dealt:null, destPos:null,
         racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
       });
-    }catch(e){ console.error("room create failed:", e); toast("Room create failed — check Firestore rules/network."); return null; }
+    }catch(e){ console.error("[DL] room create failed:", e); toast("Room create failed — check Firestore rules/network."); return null; }
   }
 
   // Claim a seat atomically
@@ -116,10 +122,10 @@ async function ensureRoom(){
     setSeatLabel(seat);
     seatPill.title = roomId;
   }catch(e){
-    console.error("seat claim failed:", e); toast("Seat claim failed — network?");
+    console.error("[DL] seat claim failed:", e); toast("Seat claim failed — network?");
   }
 
-  // Subscribe live
+  // Live listener
   if (unsubRoom) unsubRoom();
   unsubRoom = roomRef.onSnapshot((doc)=>{
     const D = doc.data(); if(!D) return;
@@ -158,7 +164,7 @@ async function createRoom(){
     await ensureRoom();
   }catch(e){
     console.error("[DL] createRoom error:", e);
-    alert("Couldn’t create the room — likely the Firestore stream is blocked.\nSee console for details and try the long-poll reset / ad-block tips.");
+    alert("Couldn’t create the room — those 400s usually mean an extension/VPN is blocking Firestore. Try Incognito / disable blockers and reload.");
   }
 }
 
@@ -182,7 +188,7 @@ const bubK = byId("bubK"), bubC = byId("bubC");
 const K_eyeL = byId("K_eyeL"), K_eyeR = byId("K_eyeR"), K_mouth = byId("K_mouth");
 const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth");
 
-/* ===== Face default positions (safe starting point; overridden by localStorage) ===== */
+/* ===== Face default positions (overridden by localStorage from your calibration) ===== */
 const FACE_DEFAULT = { K:{x:388, y:258}, C:{x:862, y:272} };
 
 /* =================== Core Config =================== */
@@ -564,7 +570,7 @@ copyBtn.addEventListener("click", copyInvite);
 /* =================== Init =================== */
 (function init(){
   setSeatLabel(seat);
-  applySavedFacePos();         // set good defaults / saved positions
+  applySavedFacePos();         // your calibrated positions (localStorage)
   updateHUD();
   startBlinking();
   ensureRoom();                // auto-joins if ?room=...
