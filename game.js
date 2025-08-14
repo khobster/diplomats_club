@@ -1,23 +1,133 @@
-/* Diplomat’s Club — NYT-ish UI, improved SVG “head-pop” talk, mini maps, sirignanos */
+/* Diplomat’s Lounge — minimal UI + controllable faces + Lambda live flights + 2-player rooms */
 
-/* ========= Configure after you deploy your Lambda =========
-   Lambda return formats accepted:
-   A) No positions:
-      { A:{origin,dest,etaMinutes,callsign}, B:{...} }
-   B) With positions (recommended):
-      { A:{origin,dest,etaMinutes,callsign,pos:{lat,lng|lon}},
-        B:{...},
-        destPos:{lat,lng|lon} }
-============================================================*/
+/* ========= Lambda Gateway URL =========
+   Your function should accept:  GET ?airport=IATA
+   Return either:
+   { A:{origin,dest,etaMinutes,callsign}, B:{...} }
+   or (recommended)
+   { A:{...pos:{lat,lng}}, B:{...pos:{lat,lng}}, destPos:{lat,lng} }
+======================================= */
 const LIVE_PROXY = "YOUR_API_GATEWAY_URL";
 
-/* ---------------- Core Config ---------------- */
-const START_YOU = 500;
-const START_TEXAN = 2000;
-const ROUND_MS = 6500;
-const MIN_BET = 25;
+/* =================== Multiplayer (Firestore) =================== */
+let db = null, roomId = null, seat = "Solo";   // "K" | "C" | "Solo"
+(function initFirebase(){
+  const cfg = (window.FIREBASE_CONFIG||{});
+  try{
+    if (cfg.projectId){
+      const app = firebase.initializeApp(cfg);
+      db = firebase.firestore(app);
+    }
+  }catch(e){ console.warn("Firebase init skipped:", e); }
+})();
 
-/* Airport coordinates (fallback for maps when Lambda doesn’t provide) */
+function byId(id){ return document.getElementById(id); }
+const seatPill = byId("seatPill"), seatName = byId("seatName");
+const newRoomBtn = byId("newRoom"), copyBtn = byId("copyLink");
+
+/* Helpers */
+function randomCode(n=6){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); }
+function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
+function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
+
+/* Room state shape in Firestore:
+   rooms/{roomId} = {
+     createdAt, seats:{K:"", C:""}, bank:{K:500,C:2000},
+     airport:"JFK", bet:50, live:false, dealt:null, destPos:null,
+     racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
+   }
+*/
+async function ensureRoom(){
+  if(!db) return null;
+  const url = new URL(location.href);
+  roomId = url.searchParams.get("room");
+  if(!roomId) return null;
+
+  const ref = db.collection("rooms").doc(roomId);
+  const snap = await ref.get();
+  if(!snap.exists){
+    await ref.set({
+      createdAt: Date.now(),
+      seats: {K:"", C:""},
+      bank: {K:500, C:2000},
+      airport:"JFK", bet:50, live:false,
+      dealt:null, destPos:null,
+      racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
+    });
+  }
+  // claim a seat
+  const seatClaim = await db.runTransaction(async (tx)=>{
+    const d = (await tx.get(ref)).data();
+    let mySeat = d.seats.K ? (d.seats.C ? "Solo" : "C") : "K";
+    if(mySeat!=="Solo"){
+      const seats = {...d.seats};
+      seats[mySeat] = `anon-${Math.random().toString(36).slice(2,8)}`;
+      tx.update(ref, {seats});
+    }
+    return mySeat;
+  });
+  seat = seatClaim;
+  setSeatLabel(seat);
+  seatPill.title = roomId;
+  subscribeRoom(ref);
+  return ref;
+}
+
+function subscribeRoom(ref){
+  ref.onSnapshot((doc)=>{
+    const D = doc.data(); if(!D) return;
+    // Merge remote -> local state
+    S.bank = {...D.bank};
+    S.airport = D.airport; S.bet = D.bet; S.live = D.live;
+    S.dealt = D.dealt ? {...D.dealt} : null;
+    S.destPos = D.destPos || null;
+    S.racing = D.racing; S.turn = D.turn; S.chosen = D.chosen;
+    S.roundSeed = D.roundSeed; S.lastWinner = D.lastWinner;
+
+    // Update HUD & UI
+    updateHUD();
+    if(S.dealt){ renderDealt(); }
+    setLog(D.racing ? "Round in progress…" : (S.dealt ? "Pick A or B." : "Deal flights to start."));
+  });
+}
+
+async function createRoom(){
+  if(!db){ alert("Add Firebase config to enable rooms."); return; }
+  const id = randomCode(6);
+  await db.collection("rooms").doc(id).set({
+    createdAt: Date.now(),
+    seats: {K:"", C:""},
+    bank: {K:500, C:2000},
+    airport:"JFK", bet:50, live:false,
+    dealt:null, destPos:null,
+    racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
+  });
+  history.replaceState(null, "", currentUrlWithRoom(id));
+  await ensureRoom();
+}
+
+function copyInvite(){
+  const u = currentUrlWithRoom(roomId || randomCode(6));
+  navigator.clipboard.writeText(u).then(()=>{
+    toast("Invite link copied");
+  });
+}
+
+/* =================== UI/DOM refs =================== */
+const lineA = byId("lineA"), lineB = byId("lineB"), etaA = byId("etaA"), etaB = byId("etaB");
+const barA = byId("barA"), barB = byId("barB");
+const mapA = byId("mapA"), mapB = byId("mapB");
+const log = byId("log");
+const dealBtn = byId("deal"), resetBtn = byId("reset"), airportIn = byId("airport"), betIn = byId("betIn"), liveToggle = byId("liveToggle");
+const bankK = byId("bankK"), bankC = byId("bankC");
+const bubK = byId("bubK"), bubC = byId("bubC");
+
+/* ===== Sofa face nodes ===== */
+const K_eyeL = byId("K_eyeL"), K_eyeR = byId("K_eyeR"), K_mouth = byId("K_mouth");
+const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth");
+
+/* =================== Core Config =================== */
+const ROUND_MS = 6500, MIN_BET = 25;
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
   YYZ:[43.6777,-79.6248], YUL:[45.4706,-73.7408], YVR:[49.1951,-123.1779],
@@ -33,30 +143,24 @@ const AIRPORTS = {
   MSP:[44.8848,-93.2223], STL:[38.7487,-90.3700], CMH:[39.9980,-82.8919], CLE:[41.4117,-81.8494], MCI:[39.2976,-94.7139]
 };
 
-/* --------------- State --------------- */
+/* =================== State =================== */
 const S = {
-  you: START_YOU, opp: START_TEXAN,
-  bet: 50, airport: "JFK",
-  dealt: null, racing: false, chosen: null, live:false,
-  maps: { A:null, B:null }
+  bank: {K:500, C:2000},
+  airport: "JFK",
+  bet: 50, live:false,
+  dealt: null, destPos:null,
+  maps: {A:null, B:null},
+  racing:false, chosen:null, roundSeed:null, lastWinner:null,
+  turn:"K"
 };
 
-/* --------------- DOM --------------- */
-const $ = s => document.querySelector(s);
-const youCash=$("#youCash"), oppCash=$("#oppCash"), log=$("#log");
-const lineA=$("#lineA"), lineB=$("#lineB"), etaA=$("#etaA"), etaB=$("#etaB");
-const barA=$("#barA"), barB=$("#barB");
-const dealBtn=$("#deal"), resetBtn=$("#reset"), airport=$("#airport"), betIn=$("#betIn");
-const cardA=$("#A"), cardB=$("#B"), liveToggle=$("#liveToggle");
-const charK=$("#charK"), charT=$("#charT"); const bubbleK=$("#bubbleK"), bubbleT=$("#bubbleT");
-const mapA=$("#mapA"), mapB=$("#mapB");
-
-/* --------------- Utils --------------- */
-const fmtSirig = n => `${n.toLocaleString()} sirignanos`;
+/* =================== Utilities =================== */
+const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
-const setLog = t => log.textContent = t;
+const setLog = (t)=> log.textContent = t;
+function toast(t){ setLog(t); }
 
-/* normalize any {lat,lng} | {lat,lon} | [lat,lng] into [lat,lng] */
+/* lat/lng normalizer */
 function toLatLng(p){
   if(!p) return null;
   if(Array.isArray(p)) return [p[0], p[1]];
@@ -66,59 +170,99 @@ function toLatLng(p){
   return null;
 }
 
-/* Head talk / reactions */
-function flipTalk(on=true){
-  [charK, charT].forEach(el=> el.classList.toggle("talk", on));
-  if(on) setTimeout(()=>flipTalk(false), 900);
-}
-function leanOn(){ charK.classList.add("lean"); charT.classList.add("lean"); }
-function leanOff(){ charK.classList.remove("lean"); charT.classList.remove("lean"); }
-function pump(el){ el.classList.add("pump"); setTimeout(()=>el.classList.remove("pump"), 1100); }
-function slump(el){ el.classList.add("slump"); setTimeout(()=>el.classList.remove("slump"), 900); }
-function speak(el, text, ms=1500){
+/* =================== FACES ENGINE =================== */
+function showBubble(which, text, ms=1400){
+  const el = which==="K" ? bubK : bubC;
   el.textContent = text; el.classList.add("show");
-  const id = setTimeout(()=>el.classList.remove("show"), ms);
-  return ()=>clearTimeout(id);
+  setTimeout(()=>el.classList.remove("show"), ms);
 }
 
-function updateHUD(){
-  youCash.textContent = fmtSirig(S.you);
-  oppCash.textContent = fmtSirig(S.opp);
-  betIn.value = S.bet;
-  airport.value = S.airport;
-  dealBtn.disabled = (S.you<=0 || S.opp<=0);
+/* Blink loop (gentle, random) */
+function startBlinking(){
+  const pairs = [
+    [K_eyeL, K_eyeR],
+    [C_eyeL, C_eyeR]
+  ];
+  pairs.forEach(([l,r])=>{
+    (function loop(){
+      const delay = 1200 + Math.random()*2200;
+      setTimeout(()=>{
+        l.classList.add("blink"); r.classList.add("blink");
+        setTimeout(()=>{ l.classList.remove("blink"); r.classList.remove("blink"); loop(); }, 120);
+      }, delay);
+    })();
+  });
 }
 
-/* --------------- Mapping helpers --------------- */
+/* Look left/right/center */
+function eyes(which, dir="center"){
+  const dx = dir==="left"? -6 : dir==="right" ? 6 : 0;
+  const [L,R] = which==="K" ? [K_eyeL, K_eyeR] : [C_eyeL, C_eyeR];
+  [L,R].forEach(e=> e.style.transform = `translate(${dx}px,0)`);
+}
+
+/* Talking on/off (scaleY pulsing) */
+function talk(which, on=true){
+  const M = which==="K" ? K_mouth : C_mouth;
+  M.classList.toggle("talk", on);
+}
+
+/* Smile/frown by swapping the mouth element between <rect> and <path> */
+function setMouthShape(which, shape="flat"){
+  const g = (which==="K") ? byId("K") : byId("C");
+  const old = byId(which+"_mouth");
+  if(!old) return;
+  g.removeChild(old);
+  if(shape==="flat"){
+    const r = document.createElementNS("http://www.w3.org/2000/svg","rect");
+    r.setAttribute("id", which+"_mouth");
+    r.setAttribute("class","mouth");
+    r.setAttribute("x","-22"); r.setAttribute("y","38");
+    r.setAttribute("width","44"); r.setAttribute("height","14");
+    r.setAttribute("rx","7"); r.setAttribute("fill","#1b2230");
+    g.appendChild(r);
+  }else{
+    const p = document.createElementNS("http://www.w3.org/2000/svg","path");
+    p.setAttribute("id", which+"_mouth");
+    p.setAttribute("fill","none"); p.setAttribute("stroke","#1b2230"); p.setAttribute("stroke-width","10"); p.setAttribute("stroke-linecap","round");
+    if(shape==="smile") p.setAttribute("d","M -26 44 Q 0 68 26 44");
+    if(shape==="frown") p.setAttribute("d","M -26 64 Q 0 38 26 64");
+    g.appendChild(p);
+  }
+  // refresh refs
+  if(which==="K") window.K_mouth = byId("K_mouth"); else window.C_mouth = byId("C_mouth");
+}
+
+/* Quick reactions used by game flow */
+function reactWin(who){ setMouthShape(who,"smile"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
+function reactLose(who){ setMouthShape(who,"frown"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
+
+/* =================== Maps =================== */
 function ensureMap(which){
   if(S.maps[which]) return S.maps[which];
   const el = which==='A' ? mapA : mapB;
   const m = L.map(el, { zoomControl:false, attributionControl:false });
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 15 }).addTo(m);
   const plane = L.circleMarker([0,0], { radius:6, color:'#0077ff', fillColor:'#3ab8ff', fillOpacity:.9 }).addTo(m);
-  const dest = L.circleMarker([0,0], { radius:5, color:'#111827', fillColor:'#111827', fillOpacity:1 }).addTo(m);
-  const line = L.polyline([], { color:'#0ea5e9', weight:3, opacity:.9 }).addTo(m);
+  const dest  = L.circleMarker([0,0], { radius:5, color:'#111827', fillColor:'#111827', fillOpacity:1 }).addTo(m);
+  const line  = L.polyline([], { color:'#0ea5e9', weight:3, opacity:.9 }).addTo(m);
   const group = L.featureGroup([plane, dest, line]).addTo(m);
   S.maps[which] = { map:m, plane, dest, line, group };
   return S.maps[which];
 }
-
 function fitAndRender(which, flight, destPos){
   const M = ensureMap(which);
   const pos = flight.pos ? toLatLng(flight.pos) : guessPos(flight);
-  const dst = toLatLng(destPos) || toLatLng(AIRPORTS[flight.dest]) || toLatLng(AIRPORTS[S.airport]) || [40.6413,-73.7781];
-
+  const dst = toLatLng(destPos) || (AIRPORTS[flight.dest] ? {lat:AIRPORTS[flight.dest][0], lng:AIRPORTS[flight.dest][1]} : null) ||
+              (AIRPORTS[S.airport] ? {lat:AIRPORTS[S.airport][0], lng:AIRPORTS[S.airport][1]} : {lat:40.6413, lng:-73.7781});
   M.plane.setLatLng(pos);
-  M.dest.setLatLng(dst);
-  M.line.setLatLngs([pos, dst]);
-
-  const bounds = L.latLngBounds([pos, dst]).pad(0.35);
+  M.dest.setLatLng([dst.lat,dst.lng]);
+  M.line.setLatLngs([pos, [dst.lat,dst.lng]]);
+  const bounds = L.latLngBounds([pos, [dst.lat,dst.lng]]).pad(0.35);
   M.map.fitBounds(bounds, { animate:false });
-
-  const distKm = L.latLng(pos[0],pos[1]).distanceTo(L.latLng(dst[0],dst[1]))/1000;
+  const distKm = L.latLng(pos[0],pos[1]).distanceTo(L.latLng(dst.lat,dst.lng))/1000;
   return Math.max(1, Math.round(distKm));
 }
-
 function guessPos(f){
   const o = AIRPORTS[f.origin], d = AIRPORTS[f.dest];
   if(!o || !d) return AIRPORTS[S.airport] || [40.6413,-73.7781];
@@ -128,7 +272,7 @@ function guessPos(f){
   return [lat, lng];
 }
 
-/* --------------- Flight sources --------------- */
+/* =================== Flight sources =================== */
 function simFlights(iata){
   const cities=Object.keys(AIRPORTS);
   const r=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
@@ -147,12 +291,37 @@ async function liveFlights(iata){
   return await r.json();
 }
 
-/* --------------- Round flow --------------- */
+/* =================== HUD / Update =================== */
+function updateHUD(){
+  bankK.textContent = fmtSirig(S.bank.K);
+  bankC.textContent = fmtSirig(S.bank.C);
+  betIn.value = S.bet;
+  airportIn.value = S.airport;
+  liveToggle.checked = S.live;
+  dealBtn.disabled = !!(S.racing) || (seat!=="K" && seat!=="C"); // only seated players can deal
+}
+
+function renderDealt(){
+  const {A,B} = S.dealt;
+  lineA.textContent = `A — ${A.origin} → ${A.dest} (${A.callsign})`;
+  lineB.textContent = `B — ${B.origin} → ${B.dest} (${B.callsign})`;
+  etaA.textContent = `ETA ~ ${A.etaMinutes} min`;
+  etaB.textContent = `ETA ~ ${B.etaMinutes} min`;
+  const da = fitAndRender('A', A, S.destPos);
+  const db = fitAndRender('B', B, S.destPos);
+  etaA.textContent += ` — ~${da} km`;
+  etaB.textContent += ` — ~${db} km`;
+}
+
+/* =================== Round flow =================== */
 async function deal(){
   if(S.racing) return;
-  S.airport = (airport.value||"JFK").toUpperCase();
-  [lineA,lineB].forEach(el=>el.textContent="Dealing…"); [etaA,etaB].forEach(el=>el.textContent="");
+  S.airport = (airportIn.value||"JFK").toUpperCase();
   barA.style.width="0%"; barB.style.width="0%";
+  lineA.textContent="Dealing…"; lineB.textContent="Dealing…"; etaA.textContent=""; etaB.textContent="";
+
+  showBubble("K","New action!"); showBubble("C","Name your flight!");
+  talk("K",true); talk("C",true); setTimeout(()=>{talk("K",false); talk("C",false);}, 900);
 
   setLog(S.live? "Pulling two inbound real flights…" : "Drawing two simulated inbound flights…");
   let data;
@@ -160,81 +329,99 @@ async function deal(){
   catch(e){ console.warn(e); data = simFlights(S.airport); setLog("Live unavailable—using simulated flights this round."); }
 
   const destPos = data.destPos || (AIRPORTS[S.airport] ? {lat:AIRPORTS[S.airport][0], lng:AIRPORTS[S.airport][1]} : null);
-  S.dealt = { A:data.A, B:data.B, destPos };
+  S.dealt = { A:data.A, B:data.B }; S.destPos = destPos;
+  S.racing=false; S.chosen=null; S.roundSeed = Math.floor(Math.random()*1e9);
 
-  const {A,B} = S.dealt;
-  lineA.textContent = `A — ${A.origin} → ${A.dest} (${A.callsign})`;
-  lineB.textContent = `B — ${B.origin} → ${B.dest} (${B.callsign})`;
-  etaA.textContent = `ETA ~ ${A.etaMinutes} min`; etaB.textContent = `ETA ~ ${B.etaMinutes} min`;
+  renderDealt();
+  setLog("Click A or B to place your bet (winner takes all).");
 
-  // Talk + bubbles
-  flipTalk(true);
-  speak(bubbleK, "New action!");
-  speak(bubbleT, "Name your flight!");
-
-  // Render maps (works in sim mode as well)
-  const distA = fitAndRender('A', A, destPos);
-  const distB = fitAndRender('B', B, destPos);
-  etaA.textContent += ` — ~${distA} km`;
-  etaB.textContent += ` — ~${distB} km`;
-
-  setLog("Click A or B to place your bet (winner takes all, sirignanos).");
-  updateHUD();
+  if(db && roomId){
+    await db.collection("rooms").doc(roomId).update({
+      airport:S.airport, bet:S.bet, live:S.live,
+      dealt:S.dealt, destPos:S.destPos,
+      racing:false, chosen:null, roundSeed:S.roundSeed, lastWinner:null
+    });
+  }
 }
 
 function start(choice){
-  if(!S.dealt||S.racing) return;
-  S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, Math.min(S.you,S.opp));
+  if(!S.dealt || S.racing) return;
+  if(seat!=="K" && seat!=="C"){ showBubble("K","Join a seat to play!"); return; }
+  if(S.turn!==seat){ showBubble(seat==="K"?"K":"C","Hold—other turn"); return; }
+
+  S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, Math.min(S.bank.K, S.bank.C));
   S.chosen = choice; S.racing = true;
-  setLog(`You bet ${fmtSirig(S.bet)} on Flight ${choice}.`);
-  leanOn();
+
+  setLog(`${seat==="K"?"Kessler":"Cajun"} bets ${fmtSirig(S.bet)} on Flight ${choice}.`);
+  eyes(seat, "right"); setTimeout(()=>eyes(seat, "center"), 600);
 
   const {A,B} = S.dealt, a=A.etaMinutes, b=B.etaMinutes, total=ROUND_MS;
-  const t0 = performance.now();
   const Ams = total * (a/(a+b)), Bms = total * (b/(a+b));
-
-  function step(now){
+  const t0 = performance.now();
+  (function step(now){
     const t = now - t0;
     barA.style.width = Math.min(100, (t/Ams)*100).toFixed(1)+"%";
     barB.style.width = Math.min(100, (t/Bms)*100).toFixed(1)+"%";
     if(t<Ams || t<Bms) requestAnimationFrame(step); else resolve();
-  }
-  requestAnimationFrame(step);
+  })(performance.now());
 }
 
 function resolve(){
   const {A,B}=S.dealt;
-  const winner = (A.etaMinutes===B.etaMinutes) ? (Math.random()<.5?'A':'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
-  const youWon = (S.chosen===winner);
-  leanOff();
+  const tie = (A.etaMinutes===B.etaMinutes);
+  const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
 
-  if(youWon){
-    S.you+=S.bet; S.opp-=S.bet;
-    setLog(`WIN! Flight ${winner} first — ${fmtSirig(S.bet)} to you.`);
-    pump(charK); slump(charT);
-    speak(bubbleK, "YES!", 900); speak(bubbleT, "Dang.", 900);
+  const chooser = seat; // who clicked start on this client
+  const youPicked = S.chosen;
+  const chooserWon = (youPicked===winner);
+
+  if(chooserWon){
+    S.bank[seat]+=S.bet;
+    S.bank[seat==="K"?"C":"K"]-=S.bet;
+    setLog(`WIN! Flight ${winner} first — ${fmtSirig(S.bet)} to ${seat==="K"?"Kessler":"Cajun"}.`);
+    reactWin(seat); reactLose(seat==="K"?"C":"K");
+    showBubble(seat,"YES!", 900);
   }else{
-    S.you-=S.bet; S.opp+=S.bet;
-    setLog(`Lost. Flight ${winner} beat your pick — ${fmtSirig(S.bet)} to the Cajun.`);
-    pump(charT); slump(charK);
-    speak(bubbleT, "HA!", 900); speak(bubbleK, "Nooo!", 900);
+    S.bank[seat]-=S.bet;
+    S.bank[seat==="K"?"C":"K"]+=S.bet;
+    setLog(`Lost. Flight ${winner} beat your pick — ${fmtSirig(S.bet)} to ${seat==="K"?"Cajun":"Kessler"}.`);
+    reactWin(seat==="K"?"C":"K"); reactLose(seat);
+    showBubble(seat==="K"?"C":"K","Ha!", 900);
   }
-  S.bet = clamp(S.bet, MIN_BET, Math.min(S.you,S.opp));
-  S.racing=false; updateHUD();
 
-  if(S.you<=0){ setLog("Busted! Refresh to try again."); }
-  if(S.opp<=0){ setLog("You cleaned him out! The Cajun tips his hat."); }
+  bankK.textContent = fmtSirig(S.bank.K);
+  bankC.textContent = fmtSirig(S.bank.C);
+  S.racing=false; S.lastWinner = winner; S.turn = (S.turn==="K"?"C":"K");
+  if(S.bank.K<=0) setLog("Kessler is busted!"); if(S.bank.C<=0) setLog("The Cajun is busted!");
+
+  if(db && roomId){
+    db.collection("rooms").doc(roomId).update({
+      bank:S.bank, racing:false, chosen:null, lastWinner:winner, turn:S.turn
+    });
+  }
 }
 
-/* --------------- Events --------------- */
-$("#A").addEventListener("click", ()=> start('A'));
-$("#B").addEventListener("click", ()=> start('B'));
+/* =================== Events =================== */
+byId("A").addEventListener("click", ()=> start('A'));
+byId("B").addEventListener("click", ()=> start('B'));
 dealBtn.addEventListener("click", deal);
-resetBtn.addEventListener("click", ()=>{ Object.assign(S,{you:START_YOU,opp:START_TEXAN,bet:50}); updateHUD(); setLog("Bank reset."); });
-airport.addEventListener("change", ()=> S.airport=airport.value.toUpperCase());
-betIn.addEventListener("change", ()=> S.bet=clamp(Number(betIn.value||MIN_BET),MIN_BET,Math.min(S.you,S.opp)));
-liveToggle.addEventListener("change", e=>{ S.live=e.target.checked; setLog(S.live?"LIVE mode ON (via Lambda)":"Simulated mode"); });
+resetBtn.addEventListener("click", async ()=>{
+  S.bank={K:500,C:2000}; bankK.textContent=fmtSirig(S.bank.K); bankC.textContent=fmtSirig(S.bank.C);
+  setLog("Bank reset.");
+  if(db&&roomId){ await db.collection("rooms").doc(roomId).update({bank:S.bank}); }
+});
+airportIn.addEventListener("change", ()=> S.airport=airportIn.value.toUpperCase());
+betIn.addEventListener("change", ()=> S.bet=clamp(Number(betIn.value||MIN_BET),MIN_BET,Math.min(S.bank.K,S.bank.C)));
+liveToggle.addEventListener("change", e=>{ S.live=e.target.checked; setLog(S.live?"LIVE mode ON (via Lambda)":"Simulated mode"); if(db&&roomId){ db.collection("rooms").doc(roomId).update({live:S.live}); } });
 
-/* --------------- Init --------------- */
-updateHUD();
-setLog("Welcome to the Diplomat’s Club. Deal flights to start.");
+newRoomBtn.addEventListener("click", createRoom);
+copyBtn.addEventListener("click", copyInvite);
+
+/* =================== Init =================== */
+(function init(){
+  setSeatLabel(seat);
+  updateHUD();
+  startBlinking();
+  ensureRoom();  // enable if ?room=...
+  setLog("Welcome to the Diplomat’s Lounge. Deal flights to start.");
+})();
