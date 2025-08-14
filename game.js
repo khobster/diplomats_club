@@ -1,12 +1,6 @@
 /* Diplomat’s Lounge — minimal UI + controllable faces + Lambda live flights + 2-player rooms */
 
-/* ========= Lambda Gateway URL =========
-   Your function should accept:  GET ?airport=IATA
-   Return either:
-   { A:{origin,dest,etaMinutes,callsign}, B:{...} }
-   or (recommended)
-   { A:{...pos:{lat,lng}}, B:{...pos:{lat,lng}}, destPos:{lat,lng} }
-======================================= */
+/* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
 
 /* =================== Multiplayer (Firestore) =================== */
@@ -27,52 +21,72 @@ function randomCode(n=6){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Arr
 function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
 function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
 
-/* -------- Firebase init (idempotent; long-poll fallback; probe) -------- */
+/* ===== Banner if Firestore blocked ===== */
+function showFsBlocked(msg){
+  let b = byId("fsBlocked");
+  if(!b){
+    b = document.createElement("div");
+    b.id = "fsBlocked";
+    Object.assign(b.style,{
+      position:"fixed",left:"50%",transform:"translateX(-50%)",
+      bottom:"14px",padding:"10px 14px",borderRadius:"12px",
+      background:"#fee2e2",color:"#7f1d1d",boxShadow:"0 8px 30px rgba(0,0,0,.12)",
+      zIndex:9999,fontFamily:"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+      fontSize:"14px"
+    });
+    document.body.appendChild(b);
+  }
+  b.textContent = msg || "Firestore connection blocked (ad-block/VPN/shields). Multiplayer disabled.";
+}
+
+/* -------- Firebase init (force long-poll; idempotent; probe) -------- */
 (function initFirebase(){
   try{
     const cfg = window.FIREBASE_CONFIG;
     if (!cfg || !cfg.projectId){
       console.warn("[DL] No FIREBASE_CONFIG; rooms disabled.");
+      disableRooms("No FIREBASE_CONFIG on page — multiplayer off.");
       return;
     }
-    // init app once
     if (!firebase.apps.length) firebase.initializeApp(cfg);
 
-    // get Firestore and apply settings ONCE per page (prevents override warnings)
     db = firebase.firestore();
+
     if (!window.__DL_FS_SETTINGS_APPLIED__) {
       try {
+        // Force long polling explicitly (more reliable with blockers than auto-detect)
         db.settings({
-          experimentalAutoDetectLongPolling: true,   // auto-fallback if stream is blocked
+          experimentalForceLongPolling: true,
+          experimentalLongPollingOptions: { timeoutSeconds: 15 },
           useFetchStreams: false
         });
       } catch (e) {
-        console.warn("[DL] db.settings warn (ok on some SDKs):", e);
+        console.warn("[DL] db.settings warn:", e);
       }
+      try { firebase.firestore.setLogLevel('error'); } catch {}
       window.__DL_FS_SETTINGS_APPLIED__ = true;
     }
-    try { firebase.firestore.setLogLevel('error'); } catch {}
 
     console.log("[DL] Firebase connected:", firebase.app().options.projectId);
 
-    // Smoke test: if this fails, "New room" won't work either.
+    // Probe a write: if this fails, disable the room buttons with a banner.
     db.collection("_probe").doc("w").set({t: Date.now()})
       .then(()=>console.log("[DL] Firestore write probe: OK"))
       .catch(e=>{
         console.error("[DL] Firestore write probe FAILED", e);
-        alert(
-          "Firestore connection looks blocked (those 400 Write/channel errors).\n\n" +
-          "Fixes to try:\n" +
-          "• Use http://localhost (not file://)\n" +
-          "• Disable ad-block/VPN for *.googleapis.com or try Incognito\n" +
-          "• Different browser/profile or network"
-        );
+        disableRooms("Firestore blocked. Use http://localhost, turn off ad-block/VPN, or try Incognito.");
       });
   }catch(e){
     console.error("[DL] Firebase init error:", e);
-    db = null;
+    disableRooms("Firebase init error — see console.");
   }
 })();
+
+function disableRooms(reason){
+  newRoomBtn.disabled = true;
+  copyBtn.disabled = true;
+  showFsBlocked(reason);
+}
 
 /* -------- Rooms --------
 rooms/{roomId} = {
@@ -148,7 +162,7 @@ async function ensureRoom(){
 }
 
 async function createRoom(){
-  if(!db){ alert("Rooms need Firebase config. (Check window.FIREBASE_CONFIG.)"); return; }
+  if(!db){ alert("Rooms need Firebase config or an unblocked Firestore connection."); return; }
   try{
     const id = randomCode(6);
     await db.collection("rooms").doc(id).set({
@@ -164,7 +178,7 @@ async function createRoom(){
     await ensureRoom();
   }catch(e){
     console.error("[DL] createRoom error:", e);
-    alert("Couldn’t create the room — those 400s usually mean an extension/VPN is blocking Firestore. Try Incognito / disable blockers and reload.");
+    showFsBlocked("Couldn’t create the room — Firestore requests are being blocked.");
   }
 }
 
@@ -188,7 +202,7 @@ const bubK = byId("bubK"), bubC = byId("bubC");
 const K_eyeL = byId("K_eyeL"), K_eyeR = byId("K_eyeR"), K_mouth = byId("K_mouth");
 const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth");
 
-/* ===== Face default positions (overridden by localStorage from your calibration) ===== */
+/* ===== Face default positions (can be overridden) ===== */
 const FACE_DEFAULT = { K:{x:388, y:258}, C:{x:862, y:272} };
 
 /* =================== Core Config =================== */
@@ -224,19 +238,32 @@ const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 
 /* =================== FACES ENGINE =================== */
+function getExistingTransform(id){
+  const g = document.getElementById(id);
+  if(!g) return null;
+  const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(g.getAttribute('transform')||"");
+  return m ? {x:parseFloat(m[1]), y:parseFloat(m[2])} : null;
+}
 function setFaceTransform(id, x, y){
   const g = document.getElementById(id);
   if(g) g.setAttribute('transform', `translate(${Math.round(x)}, ${Math.round(y)})`);
 }
 function applySavedFacePos(){
   ['K','C'].forEach(id=>{
+    // 1) localStorage (from Shift+D)
     const s = localStorage.getItem('facePos_'+id);
     if(s){
-      try{ const {x,y}=JSON.parse(s); setFaceTransform(id,x,y); }
-      catch(_e){ /* ignore */ }
-    }else{
-      setFaceTransform(id, FACE_DEFAULT[id].x, FACE_DEFAULT[id].y);
+      try{ const {x,y}=JSON.parse(s); setFaceTransform(id,x,y); return; }catch{}
     }
+    // 2) window.FACE_POS (let you hard-code in index.html if you like)
+    if(window.FACE_POS && window.FACE_POS[id]){
+      const {x,y}=window.FACE_POS[id]; setFaceTransform(id,x,y); return;
+    }
+    // 3) existing transform already on the <g> (don’t overwrite your file)
+    const cur = getExistingTransform(id);
+    if(cur){ setFaceTransform(id, cur.x, cur.y); return; }
+    // 4) fallback defaults
+    setFaceTransform(id, FACE_DEFAULT[id].x, FACE_DEFAULT[id].y);
   });
 }
 function showBubble(which, text, ms=1400){
@@ -570,7 +597,7 @@ copyBtn.addEventListener("click", copyInvite);
 /* =================== Init =================== */
 (function init(){
   setSeatLabel(seat);
-  applySavedFacePos();         // your calibrated positions (localStorage)
+  applySavedFacePos();         // uses localStorage -> window.FACE_POS -> existing SVG -> defaults
   updateHUD();
   startBlinking();
   ensureRoom();                // auto-joins if ?room=...
