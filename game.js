@@ -11,14 +11,21 @@ const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/fligh
 
 /* =================== Multiplayer (Firestore) =================== */
 let db = null, roomId = null, seat = "Solo";   // "K" | "C" | "Solo"
+let roomRef = null, unsubRoom = null;
 (function initFirebase(){
-  const cfg = (window.FIREBASE_CONFIG||{});
   try{
-    if (cfg.projectId){
-      const app = firebase.initializeApp(cfg);
-      db = firebase.firestore(app);
+    const cfg = window.FIREBASE_CONFIG;
+    if (!cfg || !cfg.projectId){
+      console.warn("[DL] No FIREBASE_CONFIG; rooms disabled.");
+      return;
     }
-  }catch(e){ console.warn("Firebase init skipped:", e); }
+    if (!firebase.apps.length) firebase.initializeApp(cfg); // compat init
+    db = firebase.firestore(); // compat: no arg
+    console.log("[DL] Firebase connected:", firebase.app().options.projectId);
+  }catch(e){
+    console.error("[DL] Firebase init error:", e);
+    db = null;
+  }
 })();
 
 function byId(id){ return document.getElementById(id); }
@@ -29,6 +36,7 @@ const newRoomBtn = byId("newRoom"), copyBtn = byId("copyLink");
 function randomCode(n=6){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); }
 function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
 function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
+function toast(t){ setLog(t); }
 
 /* Room state shape in Firestore:
    rooms/{roomId} = {
@@ -43,10 +51,12 @@ async function ensureRoom(){
   roomId = url.searchParams.get("room");
   if(!roomId) return null;
 
-  const ref = db.collection("rooms").doc(roomId);
-  const snap = await ref.get();
+  roomRef = db.collection("rooms").doc(roomId);
+
+  // Create if missing
+  const snap = await roomRef.get();
   if(!snap.exists){
-    await ref.set({
+    await roomRef.set({
       createdAt: Date.now(),
       seats: {K:"", C:""},
       bank: {K:500, C:2000},
@@ -55,28 +65,27 @@ async function ensureRoom(){
       racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
     });
   }
-  // claim a seat
-  const seatClaim = await db.runTransaction(async (tx)=>{
-    const d = (await tx.get(ref)).data();
-    let mySeat = d.seats.K ? (d.seats.C ? "Solo" : "C") : "K";
-    if(mySeat!=="Solo"){
-      const seats = {...d.seats};
-      seats[mySeat] = `anon-${Math.random().toString(36).slice(2,8)}`;
-      tx.update(ref, {seats});
+
+  // Claim a seat atomically
+  const myId = "anon-"+Math.random().toString(36).slice(2,8);
+  const claim = await db.runTransaction(async (tx)=>{
+    const d = (await tx.get(roomRef)).data();
+    let pick = d.seats.K ? (d.seats.C ? "Solo" : "C") : "K";
+    if(pick !== "Solo"){
+      const seats = {...d.seats}; seats[pick] = myId;
+      tx.update(roomRef, {seats});
     }
-    return mySeat;
+    return pick;
   });
-  seat = seatClaim;
+  seat = claim;
   setSeatLabel(seat);
   seatPill.title = roomId;
-  subscribeRoom(ref);
-  return ref;
-}
 
-function subscribeRoom(ref){
-  ref.onSnapshot((doc)=>{
+  // Subscribe live
+  if (unsubRoom) unsubRoom();
+  unsubRoom = roomRef.onSnapshot((doc)=>{
     const D = doc.data(); if(!D) return;
-    // Merge remote -> local state
+    // Merge remote -> local
     S.bank = {...D.bank};
     S.airport = D.airport; S.bet = D.bet; S.live = D.live;
     S.dealt = D.dealt ? {...D.dealt} : null;
@@ -84,33 +93,51 @@ function subscribeRoom(ref){
     S.racing = D.racing; S.turn = D.turn; S.chosen = D.chosen;
     S.roundSeed = D.roundSeed; S.lastWinner = D.lastWinner;
 
-    // Update HUD & UI
     updateHUD();
     if(S.dealt){ renderDealt(); }
-    setLog(D.racing ? "Round in progress…" : (S.dealt ? "Pick A or B." : "Deal flights to start."));
+    setLog(S.racing ? "Round in progress…" : (S.dealt ? "Pick A or B." : "Deal flights to start."));
+  }, (err)=>{
+    console.error("[DL] room snapshot error:", err);
+    toast("Room listener error. Check Firestore rules.");
   });
+
+  return roomRef;
 }
 
 async function createRoom(){
-  if(!db){ alert("Add Firebase config to enable rooms."); return; }
-  const id = randomCode(6);
-  await db.collection("rooms").doc(id).set({
-    createdAt: Date.now(),
-    seats: {K:"", C:""},
-    bank: {K:500, C:2000},
-    airport:"JFK", bet:50, live:false,
-    dealt:null, destPos:null,
-    racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
-  });
-  history.replaceState(null, "", currentUrlWithRoom(id));
-  await ensureRoom();
+  if(!db){ alert("Rooms need Firebase config. (Check window.FIREBASE_CONFIG.)"); return; }
+  try{
+    const id = randomCode(6);
+    await db.collection("rooms").doc(id).set({
+      createdAt: Date.now(),
+      seats: {K:"", C:""},
+      bank: {K:500, C:2000},
+      airport:"JFK", bet:50, live:false,
+      dealt:null, destPos:null,
+      racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
+    });
+    history.replaceState(null, "", currentUrlWithRoom(id));
+    await ensureRoom();
+    toast("Room created: "+id);
+  }catch(e){
+    console.error("[DL] createRoom error:", e);
+    toast("Room error: "+(e.message||e));
+  }
 }
 
-function copyInvite(){
-  const u = currentUrlWithRoom(roomId || randomCode(6));
-  navigator.clipboard.writeText(u).then(()=>{
+async function copyInvite(){
+  if(!roomId){
+    // Make one on the fly for convenience
+    await createRoom();
+  }
+  const u = currentUrlWithRoom(roomId);
+  try{
+    await navigator.clipboard.writeText(u);
     toast("Invite link copied");
-  });
+  }catch(e){
+    console.error("[DL] clipboard error:", e);
+    prompt("Copy this link:", u);
+  }
 }
 
 /* =================== UI/DOM refs =================== */
@@ -158,7 +185,6 @@ const S = {
 const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 const setLog = (t)=> log.textContent = t;
-function toast(t){ setLog(t); }
 
 /* lat/lng normalizer */
 function toLatLng(p){
@@ -236,6 +262,88 @@ function setMouthShape(which, shape="flat"){
 /* Quick reactions used by game flow */
 function reactWin(who){ setMouthShape(who,"smile"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
 function reactLose(who){ setMouthShape(who,"frown"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
+
+/* ===== Face calibration (Shift+D to toggle) ===== */
+function applySavedFacePos(){
+  ['K','C'].forEach(id=>{
+    const s = localStorage.getItem('facePos_'+id);
+    if(!s) return;
+    try{
+      const {x,y}=JSON.parse(s);
+      const g = document.getElementById(id);
+      if(g) g.setAttribute('transform', `translate(${x}, ${y})`);
+    }catch(_e){}
+  });
+}
+function enableFaceCal(){
+  const svg = document.querySelector('.faces');
+  if(!svg || svg.dataset.calOn==='1') return;
+  svg.dataset.calOn = '1';
+  toast('Face calibration ON — drag faces, arrow keys to nudge (Shift=fast). S=save, R=reset, Esc=exit.');
+  let drag=null, start=null, orig=null;
+
+  svg.addEventListener('pointerdown', onDown);
+  svg.addEventListener('pointermove', onMove);
+  svg.addEventListener('pointerup', onUp);
+  document.addEventListener('keydown', onKey);
+
+  function onDown(e){
+    const g = e.target.closest('g#K, g#C'); if(!g) return;
+    drag=g; start={x:e.clientX,y:e.clientY};
+    const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(g.getAttribute('transform')||'translate(0,0)');
+    orig={x:parseFloat(m?.[1]||0), y:parseFloat(m?.[2]||0)};
+    svg.setPointerCapture(e.pointerId);
+  }
+  function onMove(e){
+    if(!drag) return;
+    const dx=e.clientX-start.x, dy=e.clientY-start.y;
+    const x=Math.round(orig.x+dx), y=Math.round(orig.y+dy);
+    drag.setAttribute('transform', `translate(${x}, ${y})`);
+  }
+  function onUp(e){
+    if(!drag) return;
+    save(drag);
+    drag=null; svg.releasePointerCapture(e.pointerId);
+  }
+  function save(g){
+    const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(g.getAttribute('transform'));
+    const pos={x:parseFloat(m[1]), y:parseFloat(m[2])};
+    localStorage.setItem('facePos_'+g.id, JSON.stringify(pos));
+    console.log(`Use in index.html:\n<g id="${g.id}" transform="translate(${pos.x}, ${pos.y})">`);
+  }
+  function onKey(e){
+    if(e.key==='Escape'){ exit(); return; }
+    if(e.key.toLowerCase()==='s'){ if(drag) save(drag); return; }
+    if(e.key.toLowerCase()==='r'){
+      localStorage.removeItem('facePos_K'); localStorage.removeItem('facePos_C'); applySavedFacePos(); return;
+    }
+    const step = e.shiftKey?5:1;
+    if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
+      const target = drag || document.getElementById('K'); // default K if none selected
+      if(!target) return;
+      const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(target.getAttribute('transform')||'translate(0,0)');
+      let x=parseFloat(m?.[1]||0), y=parseFloat(m?.[2]||0);
+      if(e.key==='ArrowLeft') x-=step;
+      if(e.key==='ArrowRight') x+=step;
+      if(e.key==='ArrowUp') y-=step;
+      if(e.key==='ArrowDown') y+=step;
+      target.setAttribute('transform', `translate(${x}, ${y})`);
+      e.preventDefault();
+    }
+  }
+  function exit(){
+    svg.removeEventListener('pointerdown', onDown);
+    svg.removeEventListener('pointermove', onMove);
+    svg.removeEventListener('pointerup', onUp);
+    document.removeEventListener('keydown', onKey);
+    delete svg.dataset.calOn;
+    toast('Calibration OFF.');
+  }
+}
+document.addEventListener('keydown', e=>{
+  if(e.shiftKey && e.key.toLowerCase()==='d') enableFaceCal();
+});
+applySavedFacePos();
 
 /* =================== Maps =================== */
 function ensureMap(which){
@@ -335,19 +443,19 @@ async function deal(){
   renderDealt();
   setLog("Click A or B to place your bet (winner takes all).");
 
-  if(db && roomId){
-    await db.collection("rooms").doc(roomId).update({
+  if(roomRef){
+    await roomRef.update({
       airport:S.airport, bet:S.bet, live:S.live,
       dealt:S.dealt, destPos:S.destPos,
       racing:false, chosen:null, roundSeed:S.roundSeed, lastWinner:null
-    });
+    }).catch(e=>console.warn("[DL] room update(deal) failed:", e));
   }
 }
 
 function start(choice){
   if(!S.dealt || S.racing) return;
   if(seat!=="K" && seat!=="C"){ showBubble("K","Join a seat to play!"); return; }
-  if(S.turn!==seat){ showBubble(seat==="K"?"K":"C","Hold—other turn"); return; }
+  if(S.turn!==seat){ showBubble(seat,"Hold—other turn"); return; }
 
   S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, Math.min(S.bank.K, S.bank.C));
   S.chosen = choice; S.racing = true;
@@ -371,22 +479,20 @@ function resolve(){
   const tie = (A.etaMinutes===B.etaMinutes);
   const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
 
-  const chooser = seat; // who clicked start on this client
   const youPicked = S.chosen;
-  const chooserWon = (youPicked===winner);
+  const youWon = (youPicked===winner);
 
-  if(chooserWon){
-    S.bank[seat]+=S.bet;
-    S.bank[seat==="K"?"C":"K"]-=S.bet;
-    setLog(`WIN! Flight ${winner} first — ${fmtSirig(S.bet)} to ${seat==="K"?"Kessler":"Cajun"}.`);
-    reactWin(seat); reactLose(seat==="K"?"C":"K");
-    showBubble(seat,"YES!", 900);
+  const me = seat;
+  const opp = seat==="K" ? "C" : "K";
+
+  if(youWon){
+    S.bank[me]+=S.bet; S.bank[opp]-=S.bet;
+    setLog(`WIN! Flight ${winner} first — ${fmtSirig(S.bet)} to ${me==="K"?"Kessler":"Cajun"}.`);
+    reactWin(me); reactLose(opp); showBubble(me,"YES!", 900);
   }else{
-    S.bank[seat]-=S.bet;
-    S.bank[seat==="K"?"C":"K"]+=S.bet;
-    setLog(`Lost. Flight ${winner} beat your pick — ${fmtSirig(S.bet)} to ${seat==="K"?"Cajun":"Kessler"}.`);
-    reactWin(seat==="K"?"C":"K"); reactLose(seat);
-    showBubble(seat==="K"?"C":"K","Ha!", 900);
+    S.bank[me]-=S.bet; S.bank[opp]+=S.bet;
+    setLog(`Lost. Flight ${winner} beat your pick — ${fmtSirig(S.bet)} to ${opp==="K"?"Kessler":"Cajun"}.`);
+    reactWin(opp); reactLose(me); showBubble(opp,"Ha!", 900);
   }
 
   bankK.textContent = fmtSirig(S.bank.K);
@@ -394,10 +500,10 @@ function resolve(){
   S.racing=false; S.lastWinner = winner; S.turn = (S.turn==="K"?"C":"K");
   if(S.bank.K<=0) setLog("Kessler is busted!"); if(S.bank.C<=0) setLog("The Cajun is busted!");
 
-  if(db && roomId){
-    db.collection("rooms").doc(roomId).update({
+  if(roomRef){
+    roomRef.update({
       bank:S.bank, racing:false, chosen:null, lastWinner:winner, turn:S.turn
-    });
+    }).catch(e=>console.warn("[DL] room update(resolve) failed:", e));
   }
 }
 
@@ -408,11 +514,20 @@ dealBtn.addEventListener("click", deal);
 resetBtn.addEventListener("click", async ()=>{
   S.bank={K:500,C:2000}; bankK.textContent=fmtSirig(S.bank.K); bankC.textContent=fmtSirig(S.bank.C);
   setLog("Bank reset.");
-  if(db&&roomId){ await db.collection("rooms").doc(roomId).update({bank:S.bank}); }
+  if(roomRef){ await roomRef.update({bank:S.bank}).catch(e=>console.warn("[DL] room update(reset)", e)); }
 });
-airportIn.addEventListener("change", ()=> S.airport=airportIn.value.toUpperCase());
-betIn.addEventListener("change", ()=> S.bet=clamp(Number(betIn.value||MIN_BET),MIN_BET,Math.min(S.bank.K,S.bank.C)));
-liveToggle.addEventListener("change", e=>{ S.live=e.target.checked; setLog(S.live?"LIVE mode ON (via Lambda)":"Simulated mode"); if(db&&roomId){ db.collection("rooms").doc(roomId).update({live:S.live}); } });
+airportIn.addEventListener("change", async ()=>{
+  S.airport=airportIn.value.toUpperCase();
+  if(roomRef) await roomRef.update({airport:S.airport}).catch(()=>{});
+});
+betIn.addEventListener("change", async ()=>{
+  S.bet=clamp(Number(betIn.value||MIN_BET),MIN_BET,Math.min(S.bank.K,S.bank.C));
+  if(roomRef) await roomRef.update({bet:S.bet}).catch(()=>{});
+});
+liveToggle.addEventListener("change", async e=>{
+  S.live=e.target.checked; setLog(S.live?"LIVE mode ON (via Lambda)":"Simulated mode");
+  if(roomRef) await roomRef.update({live:S.live}).catch(()=>{});
+});
 
 newRoomBtn.addEventListener("click", createRoom);
 copyBtn.addEventListener("click", copyInvite);
@@ -422,6 +537,6 @@ copyBtn.addEventListener("click", copyInvite);
   setSeatLabel(seat);
   updateHUD();
   startBlinking();
-  ensureRoom();  // enable if ?room=...
+  ensureRoom();  // auto-joins if ?room=...
   setLog("Welcome to the Diplomat’s Lounge. Deal flights to start.");
 })();
