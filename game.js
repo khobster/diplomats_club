@@ -1,17 +1,12 @@
 /* Diplomat’s Lounge — minimal UI + controllable faces + Lambda live flights + 2-player rooms */
 
-/* ========= Lambda Gateway URL =========
-   Your function should accept:  GET ?airport=IATA
-   Return either:
-   { A:{origin,dest,etaMinutes,callsign}, B:{...} }
-   or (recommended)
-   { A:{...pos:{lat,lng}}, B:{...pos:{lat,lng}}, destPos:{lat,lng} }
-======================================= */
+/* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
 
 /* =================== Multiplayer (Firestore) =================== */
 let db = null, roomId = null, seat = "Solo";   // "K" | "C" | "Solo"
 let roomRef = null, unsubRoom = null;
+
 (function initFirebase(){
   try{
     const cfg = window.FIREBASE_CONFIG;
@@ -21,6 +16,10 @@ let roomRef = null, unsubRoom = null;
     }
     if (!firebase.apps.length) firebase.initializeApp(cfg); // compat init
     db = firebase.firestore(); // compat: no arg
+    // >>> important: avoid WebChannel transport failures <<<
+    try {
+      db.settings({ experimentalAutoDetectLongPolling: true, useFetchStreams: false });
+    } catch(e) { console.warn("db.settings failed (ok on old SDK):", e); }
     console.log("[DL] Firebase connected:", firebase.app().options.projectId);
   }catch(e){
     console.error("[DL] Firebase init error:", e);
@@ -36,9 +35,10 @@ const newRoomBtn = byId("newRoom"), copyBtn = byId("copyLink");
 function randomCode(n=6){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); }
 function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
 function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
+const setLog = (t)=> byId("log").textContent = t;
 function toast(t){ setLog(t); }
 
-/* Room state shape in Firestore:
+/* Room doc shape:
    rooms/{roomId} = {
      createdAt, seats:{K:"", C:""}, bank:{K:500,C:2000},
      airport:"JFK", bet:50, live:false, dealt:null, destPos:null,
@@ -54,32 +54,38 @@ async function ensureRoom(){
   roomRef = db.collection("rooms").doc(roomId);
 
   // Create if missing
-  const snap = await roomRef.get();
-  if(!snap.exists){
-    await roomRef.set({
-      createdAt: Date.now(),
-      seats: {K:"", C:""},
-      bank: {K:500, C:2000},
-      airport:"JFK", bet:50, live:false,
-      dealt:null, destPos:null,
-      racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
-    });
+  const snap = await roomRef.get().catch(e=>{ console.error("room get failed:", e); });
+  if(!snap || !snap.exists){
+    try{
+      await roomRef.set({
+        createdAt: Date.now(),
+        seats: {K:"", C:""},
+        bank: {K:500, C:2000},
+        airport:"JFK", bet:50, live:false,
+        dealt:null, destPos:null,
+        racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
+      });
+    }catch(e){ console.error("room create failed:", e); toast("Room create failed — check Firestore rules/network."); return null; }
   }
 
   // Claim a seat atomically
   const myId = "anon-"+Math.random().toString(36).slice(2,8);
-  const claim = await db.runTransaction(async (tx)=>{
-    const d = (await tx.get(roomRef)).data();
-    let pick = d.seats.K ? (d.seats.C ? "Solo" : "C") : "K";
-    if(pick !== "Solo"){
-      const seats = {...d.seats}; seats[pick] = myId;
-      tx.update(roomRef, {seats});
-    }
-    return pick;
-  });
-  seat = claim;
-  setSeatLabel(seat);
-  seatPill.title = roomId;
+  try{
+    const claim = await db.runTransaction(async (tx)=>{
+      const d = (await tx.get(roomRef)).data();
+      let pick = d.seats.K ? (d.seats.C ? "Solo" : "C") : "K";
+      if(pick !== "Solo"){
+        const seats = {...d.seats}; seats[pick] = myId;
+        tx.update(roomRef, {seats});
+      }
+      return pick;
+    });
+    seat = claim;
+    setSeatLabel(seat);
+    seatPill.title = roomId;
+  }catch(e){
+    console.error("seat claim failed:", e); toast("Seat claim failed — network?");
+  }
 
   // Subscribe live
   if (unsubRoom) unsubRoom();
@@ -92,13 +98,12 @@ async function ensureRoom(){
     S.destPos = D.destPos || null;
     S.racing = D.racing; S.turn = D.turn; S.chosen = D.chosen;
     S.roundSeed = D.roundSeed; S.lastWinner = D.lastWinner;
-
     updateHUD();
     if(S.dealt){ renderDealt(); }
     setLog(S.racing ? "Round in progress…" : (S.dealt ? "Pick A or B." : "Deal flights to start."));
   }, (err)=>{
     console.error("[DL] room snapshot error:", err);
-    toast("Room listener error. Check Firestore rules.");
+    toast("Room listener error. Try reloading.");
   });
 
   return roomRef;
@@ -121,30 +126,22 @@ async function createRoom(){
     toast("Room created: "+id);
   }catch(e){
     console.error("[DL] createRoom error:", e);
-    toast("Room error: "+(e.message||e));
+    toast("Room error — check the console / network.");
   }
 }
 
 async function copyInvite(){
-  if(!roomId){
-    // Make one on the fly for convenience
-    await createRoom();
-  }
+  if(!roomId){ await createRoom(); }
+  if(!roomId) return;
   const u = currentUrlWithRoom(roomId);
-  try{
-    await navigator.clipboard.writeText(u);
-    toast("Invite link copied");
-  }catch(e){
-    console.error("[DL] clipboard error:", e);
-    prompt("Copy this link:", u);
-  }
+  try{ await navigator.clipboard.writeText(u); toast("Invite link copied"); }
+  catch(e){ console.error("[DL] clipboard error:", e); prompt("Copy this link:", u); }
 }
 
 /* =================== UI/DOM refs =================== */
 const lineA = byId("lineA"), lineB = byId("lineB"), etaA = byId("etaA"), etaB = byId("etaB");
 const barA = byId("barA"), barB = byId("barB");
 const mapA = byId("mapA"), mapB = byId("mapB");
-const log = byId("log");
 const dealBtn = byId("deal"), resetBtn = byId("reset"), airportIn = byId("airport"), betIn = byId("betIn"), liveToggle = byId("liveToggle");
 const bankK = byId("bankK"), bankC = byId("bankC");
 const bubK = byId("bubK"), bubC = byId("bubC");
@@ -152,6 +149,9 @@ const bubK = byId("bubK"), bubC = byId("bubC");
 /* ===== Sofa face nodes ===== */
 const K_eyeL = byId("K_eyeL"), K_eyeR = byId("K_eyeR"), K_mouth = byId("K_mouth");
 const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth");
+
+/* ===== Face default positions (good starting point) ===== */
+const FACE_DEFAULT = { K:{x:388, y:258}, C:{x:862, y:272} };
 
 /* =================== Core Config =================== */
 const ROUND_MS = 6500, MIN_BET = 25;
@@ -184,31 +184,33 @@ const S = {
 /* =================== Utilities =================== */
 const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
-const setLog = (t)=> log.textContent = t;
-
-/* lat/lng normalizer */
-function toLatLng(p){
-  if(!p) return null;
-  if(Array.isArray(p)) return [p[0], p[1]];
-  if(typeof p === 'object' && 'lat' in p && ('lng' in p || 'lon' in p)){
-    return [p.lat, ('lng' in p) ? p.lng : p.lon];
-  }
-  return null;
-}
 
 /* =================== FACES ENGINE =================== */
+function setFaceTransform(id, x, y){
+  const g = document.getElementById(id);
+  if(g) g.setAttribute('transform', `translate(${Math.round(x)}, ${Math.round(y)})`);
+}
+function applySavedFacePos(){
+  ['K','C'].forEach(id=>{
+    const s = localStorage.getItem('facePos_'+id);
+    if(s){
+      try{ const {x,y}=JSON.parse(s); setFaceTransform(id,x,y); }
+      catch(_e){ /* ignore */ }
+    }else{
+      setFaceTransform(id, FACE_DEFAULT[id].x, FACE_DEFAULT[id].y);
+    }
+  });
+}
+
 function showBubble(which, text, ms=1400){
   const el = which==="K" ? bubK : bubC;
   el.textContent = text; el.classList.add("show");
   setTimeout(()=>el.classList.remove("show"), ms);
 }
 
-/* Blink loop (gentle, random) */
+/* Blink loop */
 function startBlinking(){
-  const pairs = [
-    [K_eyeL, K_eyeR],
-    [C_eyeL, C_eyeR]
-  ];
+  const pairs = [[K_eyeL, K_eyeR],[C_eyeL, C_eyeR]];
   pairs.forEach(([l,r])=>{
     (function loop(){
       const delay = 1200 + Math.random()*2200;
@@ -220,20 +222,20 @@ function startBlinking(){
   });
 }
 
-/* Look left/right/center */
+/* Look */
 function eyes(which, dir="center"){
   const dx = dir==="left"? -6 : dir==="right" ? 6 : 0;
   const [L,R] = which==="K" ? [K_eyeL, K_eyeR] : [C_eyeL, C_eyeR];
   [L,R].forEach(e=> e.style.transform = `translate(${dx}px,0)`);
 }
 
-/* Talking on/off (scaleY pulsing) */
+/* Talking on/off */
 function talk(which, on=true){
   const M = which==="K" ? K_mouth : C_mouth;
   M.classList.toggle("talk", on);
 }
 
-/* Smile/frown by swapping the mouth element between <rect> and <path> */
+/* Mouth shapes */
 function setMouthShape(which, shape="flat"){
   const g = (which==="K") ? byId("K") : byId("C");
   const old = byId(which+"_mouth");
@@ -255,87 +257,84 @@ function setMouthShape(which, shape="flat"){
     if(shape==="frown") p.setAttribute("d","M -26 64 Q 0 38 26 64");
     g.appendChild(p);
   }
-  // refresh refs
   if(which==="K") window.K_mouth = byId("K_mouth"); else window.C_mouth = byId("C_mouth");
 }
 
-/* Quick reactions used by game flow */
 function reactWin(who){ setMouthShape(who,"smile"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
 function reactLose(who){ setMouthShape(who,"frown"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
 
 /* ===== Face calibration (Shift+D to toggle) ===== */
-function applySavedFacePos(){
-  ['K','C'].forEach(id=>{
-    const s = localStorage.getItem('facePos_'+id);
-    if(!s) return;
-    try{
-      const {x,y}=JSON.parse(s);
-      const g = document.getElementById(id);
-      if(g) g.setAttribute('transform', `translate(${x}, ${y})`);
-    }catch(_e){}
-  });
-}
 function enableFaceCal(){
   const svg = document.querySelector('.faces');
   if(!svg || svg.dataset.calOn==='1') return;
   svg.dataset.calOn = '1';
-  toast('Face calibration ON — drag faces, arrow keys to nudge (Shift=fast). S=save, R=reset, Esc=exit.');
+  // turn on pointer events so we can drag
+  const prevPE = svg.style.pointerEvents;
+  svg.style.pointerEvents = 'auto';
+  svg.style.outline = '2px dashed rgba(0,0,0,.15)';
+  toast('Calibration ON — 1=Kessler, 2=Cajun, drag or arrows (Shift=5px). S=save, Esc=exit.');
+
+  let selected = byId('K'); // default select K
   let drag=null, start=null, orig=null;
+
+  function xyOf(g){
+    const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(g.getAttribute('transform')||'translate(0,0)');
+    return {x:parseFloat(m?.[1]||0), y:parseFloat(m?.[2]||0)};
+  }
+  function set(g,x,y){ g.setAttribute('transform', `translate(${Math.round(x)}, ${Math.round(y)})`); }
+
+  function onDown(e){
+    const g = e.target.closest('g#K, g#C'); if(!g) return;
+    selected=g; drag=g; start={x:e.clientX,y:e.clientY}; orig=xyOf(g);
+    svg.setPointerCapture(e.pointerId);
+  }
+  function onMove(e){
+    if(!drag) return;
+    const dx=e.clientX-start.x, dy=e.clientY-start.y;
+    set(drag, orig.x+dx, orig.y+dy);
+  }
+  function onUp(e){
+    if(!drag) return;
+    save(drag); drag=null; svg.releasePointerCapture(e.pointerId);
+  }
+  function save(g){
+    const {x,y}=xyOf(g);
+    localStorage.setItem('facePos_'+g.id, JSON.stringify({x,y}));
+    console.log(`Saved ${g.id}: translate(${x}, ${y})`);
+  }
+  function select(id){ const g=byId(id); if(g) selected=g; }
+
+  function onKey(e){
+    if(e.key==='Escape'){ exit(); return; }
+    if(e.key==='1'){ select('K'); return; }
+    if(e.key==='2'){ select('C'); return; }
+    if(e.key.toLowerCase()==='s'){ if(selected) save(selected); return; }
+
+    const step = e.shiftKey?5:1;
+    if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
+      const {x,y}=xyOf(selected);
+      let nx=x, ny=y;
+      if(e.key==='ArrowLeft') nx-=step;
+      if(e.key==='ArrowRight') nx+=step;
+      if(e.key==='ArrowUp') ny-=step;
+      if(e.key==='ArrowDown') ny+=step;
+      set(selected, nx, ny);
+      e.preventDefault();
+    }
+  }
 
   svg.addEventListener('pointerdown', onDown);
   svg.addEventListener('pointermove', onMove);
   svg.addEventListener('pointerup', onUp);
   document.addEventListener('keydown', onKey);
 
-  function onDown(e){
-    const g = e.target.closest('g#K, g#C'); if(!g) return;
-    drag=g; start={x:e.clientX,y:e.clientY};
-    const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(g.getAttribute('transform')||'translate(0,0)');
-    orig={x:parseFloat(m?.[1]||0), y:parseFloat(m?.[2]||0)};
-    svg.setPointerCapture(e.pointerId);
-  }
-  function onMove(e){
-    if(!drag) return;
-    const dx=e.clientX-start.x, dy=e.clientY-start.y;
-    const x=Math.round(orig.x+dx), y=Math.round(orig.y+dy);
-    drag.setAttribute('transform', `translate(${x}, ${y})`);
-  }
-  function onUp(e){
-    if(!drag) return;
-    save(drag);
-    drag=null; svg.releasePointerCapture(e.pointerId);
-  }
-  function save(g){
-    const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(g.getAttribute('transform'));
-    const pos={x:parseFloat(m[1]), y:parseFloat(m[2])};
-    localStorage.setItem('facePos_'+g.id, JSON.stringify(pos));
-    console.log(`Use in index.html:\n<g id="${g.id}" transform="translate(${pos.x}, ${pos.y})">`);
-  }
-  function onKey(e){
-    if(e.key==='Escape'){ exit(); return; }
-    if(e.key.toLowerCase()==='s'){ if(drag) save(drag); return; }
-    if(e.key.toLowerCase()==='r'){
-      localStorage.removeItem('facePos_K'); localStorage.removeItem('facePos_C'); applySavedFacePos(); return;
-    }
-    const step = e.shiftKey?5:1;
-    if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
-      const target = drag || document.getElementById('K'); // default K if none selected
-      if(!target) return;
-      const m=/translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(target.getAttribute('transform')||'translate(0,0)');
-      let x=parseFloat(m?.[1]||0), y=parseFloat(m?.[2]||0);
-      if(e.key==='ArrowLeft') x-=step;
-      if(e.key==='ArrowRight') x+=step;
-      if(e.key==='ArrowUp') y-=step;
-      if(e.key==='ArrowDown') y+=step;
-      target.setAttribute('transform', `translate(${x}, ${y})`);
-      e.preventDefault();
-    }
-  }
   function exit(){
     svg.removeEventListener('pointerdown', onDown);
     svg.removeEventListener('pointermove', onMove);
     svg.removeEventListener('pointerup', onUp);
     document.removeEventListener('keydown', onKey);
+    svg.style.pointerEvents = prevPE;
+    svg.style.outline = 'none';
     delete svg.dataset.calOn;
     toast('Calibration OFF.');
   }
@@ -343,7 +342,6 @@ function enableFaceCal(){
 document.addEventListener('keydown', e=>{
   if(e.shiftKey && e.key.toLowerCase()==='d') enableFaceCal();
 });
-applySavedFacePos();
 
 /* =================== Maps =================== */
 function ensureMap(which){
@@ -357,6 +355,14 @@ function ensureMap(which){
   const group = L.featureGroup([plane, dest, line]).addTo(m);
   S.maps[which] = { map:m, plane, dest, line, group };
   return S.maps[which];
+}
+function toLatLng(p){
+  if(!p) return null;
+  if(Array.isArray(p)) return [p[0], p[1]];
+  if(typeof p === 'object' && 'lat' in p && ('lng' in p || 'lon' in p)){
+    return [p.lat, ('lng' in p) ? p.lng : p.lon];
+  }
+  return null;
 }
 function fitAndRender(which, flight, destPos){
   const M = ensureMap(which);
@@ -406,9 +412,8 @@ function updateHUD(){
   betIn.value = S.bet;
   airportIn.value = S.airport;
   liveToggle.checked = S.live;
-  dealBtn.disabled = !!(S.racing) || (seat!=="K" && seat!=="C"); // only seated players can deal
+  dealBtn.disabled = !!(S.racing) || (seat!=="K" && seat!=="C");
 }
-
 function renderDealt(){
   const {A,B} = S.dealt;
   lineA.textContent = `A — ${A.origin} → ${A.dest} (${A.callsign})`;
@@ -535,8 +540,9 @@ copyBtn.addEventListener("click", copyInvite);
 /* =================== Init =================== */
 (function init(){
   setSeatLabel(seat);
+  applySavedFacePos();         // set good defaults / saved positions
   updateHUD();
   startBlinking();
-  ensureRoom();  // auto-joins if ?room=...
+  ensureRoom();                // auto-joins if ?room=...
   setLog("Welcome to the Diplomat’s Lounge. Deal flights to start.");
 })();
