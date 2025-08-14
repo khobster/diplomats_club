@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Diplomat’s Club</title>
+  <title>Diplomat’s Lounge</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Inline favicon so GH Pages never 404s -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230058ff'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-family='Arial' font-size='16' fill='white'%3EDC%3C/text%3E%3C/svg%3E">
+
+  <!-- Inline favicon (avoids GH Pages 404s) -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230058ff'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-family='Arial' font-size='16' fill='white'%3EDL%3C/text%3E%3C/svg%3E">
 
   <!-- Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800&display=swap" rel="stylesheet">
@@ -14,189 +15,166 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
 
+  <!-- Firebase (optional; fill config below to enable multiplayer) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js"></script>
+  <script>
+    /* ===== Fill this to enable multiplayer; leave as {} for solo mode =====
+       Get values from Firebase console -> Project settings -> General
+    */
+    window.FIREBASE_CONFIG = {
+      /* example:
+      apiKey: "...",
+      authDomain: "...",
+      projectId: "...",
+      appId: "..."
+      */
+    };
+  </script>
+
   <style>
     :root{
-      --bg:#f6f7f9; --card:#ffffff; --ink:#0f1720; --muted:#5b6472;
-      --accent:#0058ff; --accent-2:#4c8dff; --good:#079455; --bad:#E11D48;
-      --ring:#dfe5ee; --ring-2:#cfd7e3; --shadow:rgba(16,24,40,.08);
-      --runway:#2bbef3; --runway-glow:#a8eaff;
+      --bg:#ffffff; --ink:#0f1720; --muted:#5b6472;
+      --blue:#055aff; --blue-2:#3b82f6; --good:#079455; --bad:#e11d48;
+      --ring:#e8edf4; --shadow:rgba(16,24,40,.08);
+      --stage-max: 980px;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
     body{
       margin:0; background:var(--bg); color:var(--ink);
-      font-family:"Inter", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      line-height:1.2; display:flex; flex-direction:column; align-items:center;
+      font-family:"Inter",system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+      display:flex; flex-direction:column; align-items:center;
     }
-    .frame{ width:min(100%,1000px); padding:18px 16px 40px }
-    .title{ font-weight:800; letter-spacing:.06em; text-align:center; font-size:clamp(22px,4vw,40px); margin:6px 0 16px }
 
-    /* Header strip (NYT-ish tile) */
-    .players{
-      display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:12px;
-      background:var(--card); border:1px solid var(--ring); border-radius:16px; padding:12px 16px;
-      box-shadow:0 8px 24px var(--shadow);
+    /* ——— Header: tiny, neutral ——— */
+    header{
+      width:100%; max-width:var(--stage-max);
+      padding:18px 16px 8px; display:flex; gap:12px; align-items:center; justify-content:space-between;
     }
-    .p-side{ display:flex; align-items:center; gap:12px }
-    .p-side.right{ justify-content:flex-end }
-    .avatar{
-      position:relative; width:72px; height:72px; border-radius:16px;
-      background:#f0f3f8; border:1px solid var(--ring-2); display:grid; place-items:center; overflow:hidden;
-    }
+    .brand{font-weight:800; letter-spacing:.06em}
+    .pill{display:inline-flex; align-items:center; gap:8px; border:1px solid var(--ring); border-radius:999px; padding:8px 12px; box-shadow:0 3px 10px var(--shadow)}
+    .pill small{color:var(--muted); font-weight:700}
+    .btn{border:1px solid var(--ring); border-radius:10px; padding:10px 14px; font-weight:800; cursor:pointer; background:#f6faff}
+    .btn.primary{background:var(--blue); color:#fff; border-color:var(--blue)}
+    .btn:disabled{opacity:.55; cursor:not-allowed}
+
+    /* ——— Center “Google simple” stage ——— */
+    main{ width:100%; max-width:var(--stage-max); padding:12px 16px 28px; display:flex; flex-direction:column; align-items:center; gap:18px }
+
+    /* Responsive stage with the sofa as centerpiece */
+    .stage{ width:min(100%, 900px); position:relative; aspect-ratio: 3 / 2; border-radius:22px; overflow:hidden }
+    .stage img{ width:100%; height:100%; object-fit:cover; display:block; filter: saturate(1.02) }
+
+    /* Face overlay SVG sits on top, scales with the image via viewBox */
+    .faces{ position:absolute; inset:0; pointer-events:none }
+
+    /* Speech bubbles (minimal) */
     .bubble{
-      position:absolute; left:50%; top:-6px; transform:translate(-50%,-6px);
-      background:#111827; color:#fff; font-size:12px; padding:6px 8px; border-radius:10px;
-      opacity:0; pointer-events:none; transition:opacity .15s ease, transform .15s ease; white-space:nowrap;
+      position:absolute; padding:6px 10px; border-radius:10px; background:#111827; color:#fff;
+      font-size:12px; font-weight:700; opacity:0; transform:translate(-50%,-8px); transition:opacity .16s ease, transform .16s ease;
+      white-space:nowrap; pointer-events:none;
     }
-    .bubble:after{ content:""; position:absolute; left:10px; top:100%; border:8px solid transparent; border-top-color:#111827 }
-    .bubble.show{ opacity:1; transform:translate(-50%,-12px) }
-    .name{ font-weight:700; font-size:14px }
-    .bank{ display:inline-flex; gap:8px; align-items:center; font-weight:700; font-size:14px;
-      background:#f2f5fb; border:1px solid var(--ring); border-radius:999px; padding:8px 12px; }
-    .bank .you{ color:var(--good) } .bank .opp{ color:var(--bad) }
+    .bubble.show{ opacity:1; transform:translate(-50%,-14px) }
+    #bubK{ left:24%; top:24% }   /* tweak if needed */
+    #bubC{ left:76%; top:24% }
 
-    /* Controls */
+    /* Controls cluster (simple like a search bar) */
     .controls{
-      margin-top:12px; background:var(--card); border:1px solid var(--ring); border-radius:16px; padding:12px 16px;
-      box-shadow:0 8px 24px var(--shadow); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+      display:flex; gap:8px; flex-wrap:wrap; justify-content:center;
+      border:1px solid var(--ring); border-radius:999px; padding:8px;
+      box-shadow:0 8px 24px var(--shadow); background:#fff;
     }
-    .ctl{ display:flex; align-items:center; gap:8px; color:var(--muted); font-weight:600 }
+    .ctl{display:flex; align-items:center; gap:8px}
     .ctl input[type="text"], .ctl input[type="number"]{
-      width:86px; padding:10px 12px; border-radius:10px; border:1px solid var(--ring-2); background:#fff; color:var(--ink); font-weight:700; text-align:center;
+      width:92px; padding:10px 12px; border-radius:999px; border:1px solid var(--ring); text-align:center; font-weight:800
     }
-    .btn{ border:1px solid var(--ring-2); background:#eef4ff; color:#1b3b8f; font-weight:800; padding:10px 14px; border-radius:12px; cursor:pointer; }
-    .btn.primary{ background:var(--accent); color:#fff; border-color:var(--accent) }
-    .btn:disabled{ opacity:.55; cursor:not-allowed }
+    .toggle{display:flex; gap:6px; align-items:center; font-weight:700; color:var(--muted)}
+    .bankRow{ display:flex; gap:12px; justify-content:center; align-items:center; font-weight:800 }
+    .you{ color:var(--good) } .opp{ color:var(--bad) }
 
-    /* Round */
-    .arena{ margin-top:14px; display:grid; grid-template-columns:1fr 1fr; gap:16px }
-    .card{ background:var(--card); border:1px solid var(--ring); border-radius:16px; padding:14px; box-shadow:0 8px 24px var(--shadow) }
-    .line{ font-weight:800; letter-spacing:.05em; margin-bottom:6px }
+    /* Cards (mini maps) */
+    .arena{ width:100%; display:grid; grid-template-columns:1fr 1fr; gap:14px }
+    .card{ border:1px solid var(--ring); background:#fff; border-radius:16px; padding:12px; box-shadow:0 8px 24px var(--shadow) }
+    .line{ font-weight:800; letter-spacing:.04em }
     .eta{ color:var(--muted); font-weight:700; font-size:13px }
-    .progress{ margin-top:10px; height:14px; background:#eef2f8; border:1px solid var(--ring); border-radius:999px; overflow:hidden; position:relative }
-    .bar{ height:100%; width:0%; background:linear-gradient(90deg,var(--runway),var(--runway-glow)); box-shadow:0 0 10px var(--runway-glow) inset, 0 0 6px var(--runway-glow) }
-    .map{ margin-top:10px; height:180px; border-radius:12px; overflow:hidden; border:1px solid var(--ring-2) }
-    .log{ grid-column:1/-1; text-align:center; color:#111827; font-weight:800; background:var(--card); border:1px solid var(--ring); border-radius:14px; padding:12px; box-shadow:0 8px 24px var(--shadow) }
+    .progress{ margin-top:10px; height:12px; background:#f3f6fb; border:1px solid var(--ring); border-radius:999px; overflow:hidden }
+    .bar{ height:100%; width:0%; background:linear-gradient(90deg,#19a0ff,#a8eaff) }
+    .map{ margin-top:10px; height:180px; border-radius:12px; overflow:hidden; border:1px solid var(--ring) }
+    .log{ text-align:center; font-weight:800; border:1px solid var(--ring); background:#fff; border-radius:14px; padding:12px; box-shadow:0 8px 24px var(--shadow) }
 
-    /* ——— Terrance & Phillip style pop-talking ——— */
-    .headTop{ transform-origin:50% 60%; }   /* hinge roughly at mouthline */
-    .talk .headTop{ animation:popTop .28s ease-in-out infinite }
-    @keyframes popTop{ 0%,100%{ transform:translateY(0) rotate(0) } 50%{ transform:translateY(-10px) rotate(-3deg) } }
-    .headBot{ transform-origin:50% 55%; }
-    .talk .headBot{ animation:popBot .28s ease-in-out infinite }
-    @keyframes popBot{ 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(3px) } }
+    @media (max-width:860px){
+      .arena{ grid-template-columns:1fr }
+    }
 
-    /* Small reactions */
-    .lean{ animation: lean .6s ease-in-out infinite alternate }
-    @keyframes lean { from{ transform:translateY(-1px) rotate(-1deg) } to{ transform:translateY(-3px) rotate(1deg) } }
-    .pump{ animation: pump .55s ease-in-out 6 }
-    @keyframes pump { 0%{ transform:translateY(0) } 50%{ transform:translateY(-10px) } 100%{ transform:translateY(0) } }
-    .slump{ animation: slump .7s ease-in-out 3 }
-    @keyframes slump { 0%{ transform:rotate(0) } 50%{ transform:rotate(-6deg) translateY(2px) } 100%{ transform:rotate(0) } }
+    /* ——— Face animation primitives ——— */
+    .eye{ transition: transform .12s ease }
+    .blink{ transform: scaleY(0.05) }                    /* blink state */
+    .mouth{ transform-origin:50% 50%; transition: transform .08s ease }
+    .talk{ animation: talk .22s ease-in-out infinite }   /* chatter */
+    @keyframes talk { 0%{ transform:scaleY(0.7) } 50%{ transform:scaleY(1.25) } 100%{ transform:scaleY(0.9) } }
+    .smile{ d:path("M -20 0 Q 0 14 20 0"); }             /* for <path> via CSS 'd' is not standard, so we switch classes in JS */
 
-    @media (max-width:820px){ .arena{ grid-template-columns:1fr } }
+    /* (We’ll swap whole <path> data in JS for smile/frown) */
   </style>
 </head>
 <body>
-  <div class="frame">
-    <div class="title">Diplomat’s Club</div>
+  <header>
+    <div class="brand">Diplomat’s Lounge</div>
+    <div class="pill" id="seatPill" title="Your seat">Seat: <strong id="seatName">Solo</strong></div>
+    <div style="display:flex; gap:8px">
+      <button id="newRoom" class="btn">New room</button>
+      <button id="copyLink" class="btn">Copy invite</button>
+    </div>
+  </header>
 
-    <!-- Players header -->
-    <div class="players" id="sofa">
-      <div class="p-side">
-        <div class="avatar" id="charK">
-          <!-- KESSLER — tall quiff, heavy brows, blazer; split head groups -->
-          <svg viewBox="0 0 120 120" width="64" height="64" aria-hidden="true">
-            <rect x="0" y="0" width="120" height="120" rx="18" fill="#eef2f8"/>
-            <g transform="translate(60,64)">
-              <!-- top: hair + eyes/brows + top skull -->
-              <g class="headTop">
-                <!-- quiff -->
-                <path d="M-10 -44 C-6 -56 22 -60 30 -52 C24 -40 18 -32 18 -24 L-12 -26 Z"
-                      fill="#22242b" stroke="#16181f" stroke-width="3" />
-                <!-- forehead/upper head -->
-                <ellipse cx="0" cy="-10" rx="28" ry="22" fill="#f4c7a0" stroke="#d5a983" stroke-width="2"/>
-                <!-- brows -->
-                <rect x="-12" y="-16" width="10" height="4" rx="2" fill="#1a202b"/>
-                <rect x="2" y="-16" width="10" height="4" rx="2" fill="#1a202b"/>
-                <!-- eyes -->
-                <circle cx="-7" cy="-11" r="2.4" fill="#1a202b"/>
-                <circle cx="9" cy="-11" r="2.4" fill="#1a202b"/>
-              </g>
+  <main>
+    <!-- Centerpiece stage -->
+    <div class="stage" id="stage">
+      <img src="./sofawithkesslerandcajun.png" alt="Kessler and the Cajun on a sofa" />
 
-              <!-- bottom: jaw + mouth + blazer -->
-              <g class="headBot">
-                <ellipse cx="0" cy="8" rx="29" ry="20" fill="#f4c7a0" stroke="#d5a983" stroke-width="2"/>
-                <!-- mouth -->
-                <rect x="-2" y="4" width="12" height="4" rx="2" fill="#1a202b"/>
-                <!-- blazer + shirt -->
-                <path d="M-26 20 h52 v22 a6 6 0 0 1 -6 6 h-40 a6 6 0 0 1 -6 -6 z" fill="#a97429" stroke="#6f4d19" stroke-width="2"/>
-                <rect x="-3" y="20" width="6" height="28" fill="#20304c"/>
-              </g>
-            </g>
-          </svg>
-          <div class="bubble" id="bubbleK"></div>
-        </div>
-        <div class="name">KESSLER</div>
-      </div>
+      <!-- Speech bubbles -->
+      <div class="bubble" id="bubK"></div>
+      <div class="bubble" id="bubC"></div>
 
-      <div class="bank">KESSLER: <span id="youCash" class="you">500 sirignanos</span></div>
+      <!-- Overlay SVG (viewBox matches PNG proportions so everything scales) -->
+      <svg class="faces" viewBox="0 0 1152 768" preserveAspectRatio="none">
+        <!-- Kessler face (approx positions tuned to the provided image) -->
+        <g id="K" transform="translate(330, 305)">
+          <!-- eyes (left/right) -->
+          <ellipse id="K_eyeL" class="eye" cx="-30" cy="0" rx="11" ry="11" fill="#1b2230"/>
+          <ellipse id="K_eyeR" class="eye" cx="30" cy="0" rx="11" ry="11" fill="#1b2230"/>
+          <!-- mouth as a rounded rect we scale for “talk”; we will also swap to a <path> smile/frown on reactions -->
+          <rect id="K_mouth" class="mouth" x="-22" y="38" width="44" height="14" rx="7" fill="#1b2230"/>
+        </g>
 
-      <div class="p-side right">
-        <div class="name">THE CAJUN</div>
-        <div class="avatar" id="charT">
-          <!-- THE CAJUN — oversized foam hat; split head groups -->
-          <svg viewBox="0 0 120 120" width="64" height="64" aria-hidden="true">
-            <rect x="0" y="0" width="120" height="120" rx="18" fill="#eef2f8"/>
-            <g transform="translate(60,64)">
-              <!-- top: huge hat + crown + eyes -->
-              <g class="headTop">
-                <!-- tall crown -->
-                <path d="M0 -56 c-22 0 -34 18 -34 36 h68 c0-18 -12-36 -34-36 z"
-                      fill="#ead6ab" stroke="#c9b792" stroke-width="3"/>
-                <!-- brim -->
-                <rect x="-44" y="-18" width="88" height="10" rx="5" fill="#dec89b" stroke="#c9b792" stroke-width="2"/>
-                <!-- upper head -->
-                <ellipse cx="0" cy="-6" rx="26" ry="20" fill="#f4c7a0" stroke="#d5a983" stroke-width="2"/>
-                <!-- eyes -->
-                <circle cx="-7" cy="-8" r="2.4" fill="#1a202b"/>
-                <circle cx="7" cy="-8" r="2.4" fill="#1a202b"/>
-                <!-- subtle brow tilt -->
-                <rect x="-13" y="-13" width="10" height="3" rx="1.5" fill="#1a202b"/>
-                <rect x="3" y="-13" width="10" height="3" rx="1.5" fill="#1a202b"/>
-              </g>
-
-              <!-- bottom: jaw + small moustache + jacket -->
-              <g class="headBot">
-                <ellipse cx="0" cy="7" rx="27" ry="18" fill="#f4c7a0" stroke="#d5a983" stroke-width="2"/>
-                <!-- 'stache -->
-                <path d="M-6 3 q6 4 12 0" stroke="#1a202b" stroke-width="3" fill="none" stroke-linecap="round"/>
-                <!-- jacket -->
-                <path d="M-24 18 h48 v22 a6 6 0 0 1 -6 6 h-36 a6 6 0 0 1 -6 -6 z" fill="#355a9a" stroke="#2c4a82" stroke-width="2"/>
-                <rect x="-2.5" y="18" width="5" height="28" fill="#20304c"/>
-              </g>
-            </g>
-          </svg>
-          <div class="bubble" id="bubbleT"></div>
-        </div>
-      </div>
+        <!-- Cajun face -->
+        <g id="C" transform="translate(830, 295)">
+          <ellipse id="C_eyeL" class="eye" cx="-28" cy="0" rx="11" ry="11" fill="#1b2230"/>
+          <ellipse id="C_eyeR" class="eye" cx="28" cy="0" rx="11" ry="11" fill="#1b2230"/>
+          <rect id="C_mouth" class="mouth" x="-22" y="38" width="44" height="14" rx="7" fill="#1b2230"/>
+        </g>
+      </svg>
     </div>
 
-    <!-- Controls -->
+    <!-- Minimal control bar -->
     <div class="controls">
       <div class="ctl">
-        <label><input id="liveToggle" type="checkbox"> LIVE airport</label>
-        <input id="airport" type="text" maxlength="4" value="JFK" />
+        <div class="toggle"><label><input id="liveToggle" type="checkbox"> LIVE</label></div>
+        <input id="airport" type="text" maxlength="4" value="JFK" placeholder="IATA" />
       </div>
       <div class="ctl"><span>Bet</span><input id="betIn" type="number" value="50" step="25" min="25" /></div>
-      <div class="ctl" style="gap:8px">
-        <button id="deal" class="btn primary">Deal flights</button>
-        <button id="reset" class="btn">Reset</button>
-      </div>
-      <div class="bank">THE CAJUN: <span id="oppCash" class="opp">2,000 sirignanos</span></div>
+      <div class="ctl"><button id="deal" class="btn primary">Deal flights</button></div>
+      <div class="ctl"><button id="reset" class="btn">Reset bank</button></div>
     </div>
 
-    <!-- Round -->
+    <div class="bankRow">
+      <span>Kessler: <span id="bankK" class="you">500 sirignanos</span></span>
+      <span>·</span>
+      <span>Cajun: <span id="bankC" class="opp">2,000 sirignanos</span></span>
+    </div>
+
+    <!-- Round / maps -->
     <div class="arena">
       <div class="card" id="A">
         <div class="line" id="lineA">A — waiting…</div>
@@ -204,17 +182,15 @@
         <div class="progress"><div class="bar" id="barA"></div></div>
         <div class="map" id="mapA"></div>
       </div>
-
       <div class="card" id="B">
         <div class="line" id="lineB">B — waiting…</div>
         <div class="eta" id="etaB"></div>
         <div class="progress"><div class="bar" id="barB"></div></div>
         <div class="map" id="mapB"></div>
       </div>
-
-      <div class="log" id="log">Welcome to the Diplomat’s Club. Deal flights to start.</div>
+      <div class="log" id="log">Welcome to the Diplomat’s Lounge. Deal flights to start.</div>
     </div>
-  </div>
+  </main>
 
   <script src="./game.js"></script>
 </body>
