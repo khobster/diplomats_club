@@ -335,8 +335,27 @@ function fitAndRender(which, flight, destPos){
   const M = ensureMap(which);
   if(!M) return 100;
   
-  const pos = guessPos(flight);
-  const dst = destPos || (AIRPORTS[flight.dest] || AIRPORTS[S.airport] || [40.6413,-73.7781]);
+  // Get plane position - use actual pos if available from live data
+  let pos;
+  if(flight.pos && flight.pos.lat && (flight.pos.lng || flight.pos.lon)) {
+    const lng = flight.pos.lng || flight.pos.lon;
+    pos = [flight.pos.lat, lng];
+  } else {
+    pos = guessPos(flight);
+  }
+  
+  // Get destination position
+  let dst;
+  if(destPos && destPos.lat && (destPos.lng || destPos.lon)) {
+    const lng = destPos.lng || destPos.lon;
+    dst = [destPos.lat, lng];
+  } else if(AIRPORTS[flight.dest]) {
+    dst = AIRPORTS[flight.dest];
+  } else if(AIRPORTS[S.airport]) {
+    dst = AIRPORTS[S.airport];
+  } else {
+    dst = [40.6413,-73.7781]; // JFK default
+  }
   
   M.plane.setLatLng(pos);
   M.dest.setLatLng(dst);
@@ -350,8 +369,25 @@ function fitAndRender(which, flight, destPos){
 }
 
 function guessPos(f){
+  // If flight has actual position data from API, use it
+  if(f.pos && f.pos.lat && (f.pos.lng || f.pos.lon)) {
+    const lng = f.pos.lng || f.pos.lon;
+    return [f.pos.lat, lng];
+  }
+  
+  // Otherwise try to interpolate between origin and dest
   const o = AIRPORTS[f.origin], d = AIRPORTS[f.dest];
-  if(!o || !d) return AIRPORTS[S.airport] || [40.6413,-73.7781];
+  if(!o || !d) {
+    // If we don't know origin, place plane near destination but not at it
+    if(d) {
+      // Place it about 100km out from destination
+      const offsetLat = d[0] + (Math.random() - 0.5) * 0.9;
+      const offsetLng = d[1] + (Math.random() - 0.5) * 0.9;
+      return [offsetLat, offsetLng];
+    }
+    return AIRPORTS[S.airport] || [40.6413,-73.7781];
+  }
+  
   const frac = Math.max(0.1, Math.min(0.9, 1 - (f.etaMinutes/60)));
   const lat = o[0] + (d[0]-o[0]) * frac;
   const lng = o[1] + (d[1]-o[1]) * frac;
@@ -392,14 +428,29 @@ function updateHUD(){
 
 function renderDealt(){
   const {A,B} = S.dealt;
-  lineA.textContent = `A — ${A.origin} → ${A.dest} (${A.callsign})`;
-  lineB.textContent = `B — ${B.origin} → ${B.dest} (${B.callsign})`;
+  
+  // For live flights, origin might be "—" so we show what we have
+  const originA = A.origin !== "—" ? A.origin : "???";
+  const originB = B.origin !== "—" ? B.origin : "???";
+  
+  lineA.textContent = `A — ${originA} → ${A.dest} (${A.callsign})`;
+  lineB.textContent = `B — ${originB} → ${B.dest} (${B.callsign})`;
   etaA.textContent = `ETA ~ ${A.etaMinutes} min`;
   etaB.textContent = `ETA ~ ${B.etaMinutes} min`;
-  const da = fitAndRender('A', A, S.destPos);
-  const db = fitAndRender('B', B, S.destPos);
-  etaA.textContent += ` — ~${da} km`;
-  etaB.textContent += ` — ~${db} km`;
+  
+  try {
+    const da = fitAndRender('A', A, S.destPos);
+    etaA.textContent += ` — ~${da} km`;
+  } catch(e) {
+    console.warn("[DL] Map A render error:", e);
+  }
+  
+  try {
+    const db = fitAndRender('B', B, S.destPos);
+    etaB.textContent += ` — ~${db} km`;
+  } catch(e) {
+    console.warn("[DL] Map B render error:", e);
+  }
 }
 
 /* =================== Round flow =================== */
