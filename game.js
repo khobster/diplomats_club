@@ -13,6 +13,21 @@ const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/fligh
 let db = null, roomId = null, seat = "Solo";   // "K" | "C" | "Solo"
 let roomRef = null, unsubRoom = null;
 
+/* DOM helpers */
+function byId(id){ return document.getElementById(id); }
+const setLog = (t)=> byId("log").textContent = t;
+function toast(t){ setLog(t); }
+
+/* Buttons / header */
+const seatPill = byId("seatPill"), seatName = byId("seatName");
+const newRoomBtn = byId("newRoom"), copyBtn = byId("copyLink");
+
+/* Helpers */
+function randomCode(n=6){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); }
+function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
+function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
+
+/* -------- Firebase init (force long-poll + smoke test) -------- */
 (function initFirebase(){
   try{
     const cfg = window.FIREBASE_CONFIG;
@@ -21,34 +36,37 @@ let roomRef = null, unsubRoom = null;
       return;
     }
     if (!firebase.apps.length) firebase.initializeApp(cfg); // compat init
-    db = firebase.firestore(); // compat API
 
-    // ---- IMPORTANT: Avoid 400 WebChannel issues (adblock/VPN/corp nets) ----
+    // Force long-polling to avoid 400 Write/channel issues (ad blockers/VPN)
+    const dbTmp = firebase.firestore();
     try {
-      // Force long-polling; disable fetch streams for older proxies
-      db.settings({ experimentalForceLongPolling: true, useFetchStreams: false });
+      dbTmp.settings({ experimentalForceLongPolling: true, useFetchStreams: false });
+      try { firebase.firestore.setLogLevel('error'); } catch {}
     } catch(e) {
-      console.warn("[DL] db.settings warn (safe to ignore on some SDKs):", e);
+      console.warn("[DL] db.settings warn (ok on some SDKs):", e);
     }
-    try { firebase.firestore.setLogLevel('error'); } catch {}
-
+    db = dbTmp;
     console.log("[DL] Firebase connected:", firebase.app().options.projectId);
+
+    // Smoke test write so button can warn immediately if blocked
+    db.collection("_probe").doc("w").set({t: Date.now()})
+      .then(()=>console.log("[DL] Firestore write probe: OK"))
+      .catch(e=>{
+        console.error("[DL] Firestore write probe FAILED", e);
+        alert(
+          "Firestore connection is being blocked (400 Write/channel).\n\n" +
+          "Quick fixes:\n" +
+          "1) Serve the site via http://localhost (not file://)\n" +
+          "   e.g., `npx http-server -p 5500`\n" +
+          "2) Disable ad-block/VPN for *.googleapis.com\n" +
+          "3) Try a fresh Chrome profile or Incognito (no extensions)"
+        );
+      });
   }catch(e){
     console.error("[DL] Firebase init error:", e);
     db = null;
   }
 })();
-
-function byId(id){ return document.getElementById(id); }
-const seatPill = byId("seatPill"), seatName = byId("seatName");
-const newRoomBtn = byId("newRoom"), copyBtn = byId("copyLink");
-
-/* Helpers */
-function randomCode(n=6){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); }
-function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
-function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
-const setLog = (t)=> byId("log").textContent = t;
-function toast(t){ setLog(t); }
 
 /* Room doc shape:
    rooms/{roomId} = {
@@ -68,8 +86,7 @@ async function ensureRoom(){
   // Create if missing
   let snap = null;
   try { snap = await roomRef.get(); }
-  catch(e){ console.error("[DL] room get failed:", e); }
-
+  catch(e){ console.error("room get failed:", e); }
   if(!snap || !snap.exists){
     try{
       await roomRef.set({
@@ -80,21 +97,17 @@ async function ensureRoom(){
         dealt:null, destPos:null,
         racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
       });
-    }catch(e){
-      console.error("[DL] room create failed:", e);
-      toast("Room create failed — check Firestore rules/network.");
-      return null;
-    }
+    }catch(e){ console.error("room create failed:", e); toast("Room create failed — check Firestore rules/network."); return null; }
   }
 
   // Claim a seat atomically
   const myId = "anon-"+Math.random().toString(36).slice(2,8);
   try{
     const claim = await db.runTransaction(async (tx)=>{
-      const d = (await tx.get(roomRef)).data();
-      let pick = d.seats.K ? (d.seats.C ? "Solo" : "C") : "K";
+      const dSnap = await tx.get(roomRef); const d = dSnap.data()||{};
+      let pick = (d.seats?.K) ? ((d.seats?.C) ? "Solo" : "C") : "K";
       if(pick !== "Solo"){
-        const seats = {...d.seats}; seats[pick] = myId;
+        const seats = {...(d.seats||{})}; seats[pick] = myId;
         tx.update(roomRef, {seats});
       }
       return pick;
@@ -103,8 +116,7 @@ async function ensureRoom(){
     setSeatLabel(seat);
     seatPill.title = roomId;
   }catch(e){
-    console.error("[DL] seat claim failed:", e);
-    toast("Seat claim failed — network?");
+    console.error("seat claim failed:", e); toast("Seat claim failed — network?");
   }
 
   // Subscribe live
@@ -118,7 +130,6 @@ async function ensureRoom(){
     S.destPos = D.destPos || null;
     S.racing = D.racing; S.turn = D.turn; S.chosen = D.chosen;
     S.roundSeed = D.roundSeed; S.lastWinner = D.lastWinner;
-
     updateHUD();
     if(S.dealt){ renderDealt(); }
     setLog(S.racing ? "Round in progress…" : (S.dealt ? "Pick A or B." : "Deal flights to start."));
@@ -134,8 +145,7 @@ async function createRoom(){
   if(!db){ alert("Rooms need Firebase config. (Check window.FIREBASE_CONFIG.)"); return; }
   try{
     const id = randomCode(6);
-    const ref = db.collection("rooms").doc(id);
-    await ref.set({
+    await db.collection("rooms").doc(id).set({
       createdAt: Date.now(),
       seats: {K:"", C:""},
       bank: {K:500, C:2000},
@@ -148,7 +158,7 @@ async function createRoom(){
     await ensureRoom();
   }catch(e){
     console.error("[DL] createRoom error:", e);
-    toast("Room error — check the console / network.");
+    alert("Couldn’t create the room — likely the Firestore stream is blocked.\nSee console for details and try the long-poll reset / ad-block tips.");
   }
 }
 
@@ -172,7 +182,7 @@ const bubK = byId("bubK"), bubC = byId("bubC");
 const K_eyeL = byId("K_eyeL"), K_eyeR = byId("K_eyeR"), K_mouth = byId("K_mouth");
 const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth");
 
-/* ===== Face defaults (used ONLY if no saved value and no transform baked) ===== */
+/* ===== Face default positions (safe starting point; overridden by localStorage) ===== */
 const FACE_DEFAULT = { K:{x:388, y:258}, C:{x:862, y:272} };
 
 /* =================== Core Config =================== */
@@ -208,37 +218,26 @@ const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 
 /* =================== FACES ENGINE =================== */
-function parseTransform(el){
-  const t = el.getAttribute('transform')||"";
-  const m = /translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(t);
-  return m ? {x:+m[1], y:+m[2]} : null;
-}
 function setFaceTransform(id, x, y){
-  const g = byId(id);
+  const g = document.getElementById(id);
   if(g) g.setAttribute('transform', `translate(${Math.round(x)}, ${Math.round(y)})`);
 }
 function applySavedFacePos(){
   ['K','C'].forEach(id=>{
-    const g = byId(id);
-    const saved = localStorage.getItem('facePos_'+id);
-    if(saved){
-      try{ const {x,y}=JSON.parse(saved); setFaceTransform(id,x,y); return; }
-      catch(_e){ /* ignore bad JSON */ }
-    }
-    // No saved — if HTML already has a translate, keep it; else use default
-    const baked = parseTransform(g);
-    if(!baked){
+    const s = localStorage.getItem('facePos_'+id);
+    if(s){
+      try{ const {x,y}=JSON.parse(s); setFaceTransform(id,x,y); }
+      catch(_e){ /* ignore */ }
+    }else{
       setFaceTransform(id, FACE_DEFAULT[id].x, FACE_DEFAULT[id].y);
     }
   });
 }
-
 function showBubble(which, text, ms=1400){
   const el = which==="K" ? bubK : bubC;
   el.textContent = text; el.classList.add("show");
   setTimeout(()=>el.classList.remove("show"), ms);
 }
-
 /* Blink loop */
 function startBlinking(){
   const pairs = [[K_eyeL, K_eyeR],[C_eyeL, C_eyeR]];
@@ -252,20 +251,17 @@ function startBlinking(){
     })();
   });
 }
-
 /* Look */
 function eyes(which, dir="center"){
   const dx = dir==="left"? -6 : dir==="right" ? 6 : 0;
   const [L,R] = which==="K" ? [K_eyeL, K_eyeR] : [C_eyeL, C_eyeR];
   [L,R].forEach(e=> e.style.transform = `translate(${dx}px,0)`);
 }
-
 /* Talking on/off */
 function talk(which, on=true){
   const M = which==="K" ? K_mouth : C_mouth;
   M.classList.toggle("talk", on);
 }
-
 /* Mouth shapes */
 function setMouthShape(which, shape="flat"){
   const g = (which==="K") ? byId("K") : byId("C");
@@ -290,7 +286,6 @@ function setMouthShape(which, shape="flat"){
   }
   if(which==="K") window.K_mouth = byId("K_mouth"); else window.C_mouth = byId("C_mouth");
 }
-
 function reactWin(who){ setMouthShape(who,"smile"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
 function reactLose(who){ setMouthShape(who,"frown"); talk(who,true); setTimeout(()=>{ talk(who,false); setMouthShape(who,"flat"); }, 1200); }
 
@@ -299,8 +294,6 @@ function enableFaceCal(){
   const svg = document.querySelector('.faces');
   if(!svg || svg.dataset.calOn==='1') return;
   svg.dataset.calOn = '1';
-
-  // turn on pointer events so we can drag
   const prevPE = svg.style.pointerEvents;
   svg.style.pointerEvents = 'auto';
   svg.style.outline = '2px dashed rgba(0,0,0,.15)';
@@ -318,7 +311,7 @@ function enableFaceCal(){
   function onDown(e){
     const g = e.target.closest('g#K, g#C'); if(!g) return;
     selected=g; drag=g; start={x:e.clientX,y:e.clientY}; orig=xyOf(g);
-    try{ svg.setPointerCapture(e.pointerId); }catch{}
+    svg.setPointerCapture(e.pointerId);
   }
   function onMove(e){
     if(!drag) return;
@@ -327,8 +320,7 @@ function enableFaceCal(){
   }
   function onUp(e){
     if(!drag) return;
-    save(drag); drag=null;
-    try{ svg.releasePointerCapture(e.pointerId); }catch{}
+    save(drag); drag=null; svg.releasePointerCapture(e.pointerId);
   }
   function save(g){
     const {x,y}=xyOf(g);
@@ -343,7 +335,6 @@ function enableFaceCal(){
     if(e.key==='2'){ select('C'); return; }
     if(e.key.toLowerCase()==='s'){ if(selected) save(selected); return; }
 
-    if(!selected) return;
     const step = e.shiftKey?5:1;
     if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
       const {x,y}=xyOf(selected);
@@ -491,7 +482,7 @@ async function deal(){
   }
 }
 
-async function start(choice){
+function start(choice){
   if(!S.dealt || S.racing) return;
   if(seat!=="K" && seat!=="C"){ showBubble("K","Join a seat to play!"); return; }
   if(S.turn!==seat){ showBubble(seat,"Hold—other turn"); return; }
@@ -501,11 +492,6 @@ async function start(choice){
 
   setLog(`${seat==="K"?"Kessler":"Cajun"} bets ${fmtSirig(S.bet)} on Flight ${choice}.`);
   eyes(seat, "right"); setTimeout(()=>eyes(seat, "center"), 600);
-
-  // Broadcast that this round is racing + chosen flight
-  if(roomRef){
-    roomRef.update({ racing:true, chosen:choice }).catch(()=>{});
-  }
 
   const {A,B} = S.dealt, a=A.etaMinutes, b=B.etaMinutes, total=ROUND_MS;
   const Ams = total * (a/(a+b)), Bms = total * (b/(a+b));
@@ -572,14 +558,13 @@ liveToggle.addEventListener("change", async e=>{
   S.live=e.target.checked; setLog(S.live?"LIVE mode ON (via Lambda)":"Simulated mode");
   if(roomRef) await roomRef.update({live:S.live}).catch(()=>{});
 });
-
 newRoomBtn.addEventListener("click", createRoom);
 copyBtn.addEventListener("click", copyInvite);
 
 /* =================== Init =================== */
 (function init(){
   setSeatLabel(seat);
-  applySavedFacePos();         // keep baked HTML transforms unless saved overrides exist
+  applySavedFacePos();         // set good defaults / saved positions
   updateHUD();
   startBlinking();
   ensureRoom();                // auto-joins if ?room=...
