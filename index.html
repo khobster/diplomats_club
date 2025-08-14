@@ -36,7 +36,7 @@
       --blue:#055aff; --good:#079455; --bad:#e11d48;
       --ring:#e8edf4; --shadow:rgba(16,24,40,.08);
       /* Tighten overall footprint so no scroll on laptops */
-      --stage-max: 820px; /* was 980/900 */
+      --stage-max: 820px;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -131,16 +131,16 @@
       <div class="bubble" id="bubC"></div>
 
       <!-- Overlay SVG aligned to the PNG (viewBox from your asset) -->
-      <svg class="faces" viewBox="0 0 1152 768" preserveAspectRatio="none">
-        <!-- Kessler (slight upward shift for better alignment) -->
-        <g id="K" transform="translate(400, 180)">
+      <svg class="faces" viewBox="0 0 1152 768" preserveAspectRatio="xMidYMid slice">
+        <!-- Kessler -->
+        <g id="K" transform="translate(365, 262)">
           <ellipse id="K_eyeL" class="eye" cx="-30" cy="0" rx="11" ry="11" fill="#1b2230"/>
           <ellipse id="K_eyeR" class="eye" cx="30"  cy="0" rx="11" ry="11" fill="#1b2230"/>
           <rect id="K_mouth" class="mouth" x="-22" y="38" width="44" height="14" rx="7" fill="#1b2230"/>
         </g>
 
-        <!-- Cajun (moved right per your note) -->
-        <g id="C" transform="translate(805, 360)">
+        <!-- Cajun (moved right) -->
+        <g id="C" transform="translate(865, 278)">
           <ellipse id="C_eyeL" class="eye" cx="-28" cy="0" rx="11" ry="11" fill="#1b2230"/>
           <ellipse id="C_eyeR" class="eye" cx="28"  cy="0" rx="11" ry="11" fill="#1b2230"/>
           <rect id="C_mouth" class="mouth" x="-22" y="38" width="44" height="14" rx="7" fill="#1b2230"/>
