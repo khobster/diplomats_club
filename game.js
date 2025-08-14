@@ -7,7 +7,7 @@
    or (recommended)
    { A:{...pos:{lat,lng}}, B:{...pos:{lat,lng}}, destPos:{lat,lng} }
 ======================================= */
-const LIVE_PROXY = "YOUR_API_GATEWAY_URL";
+const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
 
 /* =================== Multiplayer (Firestore) =================== */
 let db = null, roomId = null, seat = "Solo";   // "K" | "C" | "Solo"
