@@ -280,9 +280,10 @@ const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth"
 
 /* =================== Core Config =================== */
 const MIN_BET = 25;
-// REAL-TIME RACING: 1 minute ETA = 1 actual minute!
-const REAL_TIME_RACING = true; // Set to false for quick 6.5 second races
-const QUICK_RACE_MS = 6500; // Only used if REAL_TIME_RACING is false
+// REAL-TIME RACING with live updates!
+const REAL_TIME_RACING = true; 
+const LIVE_UPDATE_INTERVAL = 3 * 60 * 1000; // Update every 3 minutes (conservative for API limits)
+const MIN_RACE_MINUTES = 15; // Prefer flights at least 15 minutes out for better drama
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
   YYZ:[43.6777,-79.6248], YUL:[45.4706,-73.7408], YVR:[49.1951,-123.1779],
@@ -314,71 +315,162 @@ const S = {
 const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 
-/* =================== Race Animation =================== */
+/* =================== Live Flight Updates =================== */
+async function updateLivePositions() {
+  if(!S.racing || !S.dealt || !S.live) return;
+  
+  console.log("[DL] Fetching live position updates...");
+  
+  try {
+    // Call Lambda to get current positions
+    const url = `${LIVE_PROXY}?airport=${encodeURIComponent(S.airport)}&tracking=true`;
+    const r = await fetch(url, {cache:"no-store"});
+    if(!r.ok) throw new Error("Live update failed");
+    const data = await r.json();
+    
+    // Try to match our flights with updated positions
+    const flightA = S.dealt.A;
+    const flightB = S.dealt.B;
+    
+    // Look for our flights in the new data by callsign
+    let updatedA = null, updatedB = null;
+    
+    // Check if response has tracking data
+    if(data.tracked) {
+      updatedA = data.tracked.find(f => f.callsign === flightA.callsign);
+      updatedB = data.tracked.find(f => f.callsign === flightB.callsign);
+    } else {
+      // Fallback: check regular A/B if tracking endpoint isn't working
+      if(data.A && data.A.callsign === flightA.callsign) updatedA = data.A;
+      if(data.B && data.B.callsign === flightB.callsign) updatedB = data.B;
+    }
+    
+    // Update positions and ETAs if we found the flights
+    let updated = false;
+    if(updatedA && updatedA.pos) {
+      S.dealt.A.pos = updatedA.pos;
+      S.dealt.A.etaMinutes = updatedA.etaMinutes;
+      console.log(`[DL] Flight A updated: ETA ${updatedA.etaMinutes} min`);
+      updated = true;
+      
+      // Show a notification about the update
+      showBubble("K", `Flight A: ${updatedA.etaMinutes} min!`, 2000);
+    }
+    
+    if(updatedB && updatedB.pos) {
+      S.dealt.B.pos = updatedB.pos;
+      S.dealt.B.etaMinutes = updatedB.etaMinutes;
+      console.log(`[DL] Flight B updated: ETA ${updatedB.etaMinutes} min`);
+      updated = true;
+      
+      showBubble("C", `Flight B: ${updatedB.etaMinutes} min!`, 2000);
+    }
+    
+    if(updated) {
+      // Re-render the flight info
+      renderDealt();
+      
+      // Update Firebase with new positions
+      if(roomRef) {
+        await window.firebaseUpdateDoc(roomRef, {
+          dealt: S.dealt
+        }).catch(e => console.warn("[DL] Failed to sync live updates:", e));
+      }
+    }
+    
+  } catch(e) {
+    console.warn("[DL] Live position update failed:", e);
+    // Continue with interpolated positions
+  }
+}
+
+/* =================== Race Animation with Live Updates =================== */
 function startRaceAnimation() {
   if(!S.dealt || !S.racing) return;
   
   const {A,B} = S.dealt;
-  const a = A.etaMinutes, b = B.etaMinutes;
+  let a = A.etaMinutes, b = B.etaMinutes;
   
-  // Calculate race duration
+  // Calculate initial race duration
   let raceMs;
   if(REAL_TIME_RACING) {
-    // Real-time: shorter ETA wins first
-    // Race lasts as long as the shorter ETA
     const winnerMinutes = Math.min(a, b);
-    raceMs = winnerMinutes * 60 * 1000; // Convert minutes to milliseconds
-    
-    setLog(`Racing in REAL TIME! Flight with ${winnerMinutes} min ETA will land in ${winnerMinutes} actual minutes!`);
+    raceMs = winnerMinutes * 60 * 1000;
+    setLog(`LIVE RACE! Updates every 3 min. First to land wins!`);
   } else {
-    // Quick mode for testing
-    raceMs = QUICK_RACE_MS;
+    raceMs = 6500; // Quick mode for testing
   }
   
-  // Store race start time globally so we can resume if needed
   S.raceStartTime = Date.now();
   S.raceDuration = raceMs;
   
-  // Calculate when each flight "finishes"
-  const Ams = REAL_TIME_RACING ? (a * 60 * 1000) : (raceMs * (a/(a+b)));
-  const Bms = REAL_TIME_RACING ? (b * 60 * 1000) : (raceMs * (b/(a+b)));
+  // Set up live position updates if in real-time mode
+  let updateInterval = null;
+  if(REAL_TIME_RACING && S.live) {
+    // First update after 1 minute, then every 3 minutes
+    setTimeout(() => updateLivePositions(), 60000);
+    updateInterval = setInterval(() => updateLivePositions(), LIVE_UPDATE_INTERVAL);
+  }
   
-  // Show countdown timer
   const timerEl = byId("log");
   
   // Animate progress bars and planes
   (function step(){
+    if(!S.racing) {
+      // Race ended, clean up
+      if(updateInterval) clearInterval(updateInterval);
+      return;
+    }
+    
     const elapsed = Date.now() - S.raceStartTime;
     
-    // Calculate progress for each flight
-    const progressA = Math.min(100, (elapsed/Ams)*100);
-    const progressB = Math.min(100, (elapsed/Bms)*100);
+    // Get current ETAs (might have been updated)
+    const currentA = S.dealt.A.etaMinutes;
+    const currentB = S.dealt.B.etaMinutes;
+    
+    // Calculate progress based on current ETAs
+    const progressA = Math.min(100, (elapsed / (currentA * 60 * 1000)) * 100);
+    const progressB = Math.min(100, (elapsed / (currentB * 60 * 1000)) * 100);
     
     barA.style.width = progressA.toFixed(1)+"%";
     barB.style.width = progressB.toFixed(1)+"%";
     
-    // Update map positions to show planes getting closer
+    // Update map positions
     if(S.maps.A && S.maps.B) {
-      updatePlanePosition('A', progressA/100);
-      updatePlanePosition('B', progressB/100);
+      // If we have live positions, use them directly
+      if(S.dealt.A.pos) {
+        const pos = S.dealt.A.pos;
+        S.maps.A.plane.setLatLng([pos.lat, pos.lng || pos.lon]);
+      } else {
+        updatePlanePosition('A', progressA/100);
+      }
+      
+      if(S.dealt.B.pos) {
+        const pos = S.dealt.B.pos;
+        S.maps.B.plane.setLatLng([pos.lat, pos.lng || pos.lon]);
+      } else {
+        updatePlanePosition('B', progressB/100);
+      }
     }
     
-    // Show time remaining for leader
+    // Show time remaining
     if(REAL_TIME_RACING && S.racing) {
-      const minRemaining = Math.max(0, Math.min(a, b) - (elapsed / 60000));
+      const leadFlight = currentA < currentB ? 'A' : 'B';
+      const leadETA = Math.min(currentA, currentB);
+      const minRemaining = Math.max(0, leadETA - (elapsed / 60000));
       const seconds = Math.floor((minRemaining % 1) * 60);
       const minutes = Math.floor(minRemaining);
-      timerEl.textContent = `Race in progress... Time to landing: ${minutes}:${seconds.toString().padStart(2, '0')}`;
+      timerEl.textContent = `LIVE RACE - Flight ${leadFlight} leads - ETA: ${minutes}:${seconds.toString().padStart(2, '0')}`;
     }
     
-    // Check if race is still going
-    if(S.racing && (elapsed < Ams || elapsed < Bms)) {
-      requestAnimationFrame(step);
-    } else if(S.racing) {
-      // Race finished - only the turn player resolves
+    // Check if someone has landed (100% progress)
+    if(progressA >= 100 || progressB >= 100) {
+      if(updateInterval) clearInterval(updateInterval);
       if(seat === S.turn) {
         resolve();
       }
+    } else {
+      requestAnimationFrame(step);
     }
   })();
 }
@@ -631,22 +723,41 @@ async function deal(){
   talk("C",true);
   setTimeout(()=>{talk("K",false); talk("C",false);}, 900);
 
-  setLog(S.live? "Pulling two inbound real flights…" : "Drawing two simulated inbound flights…");
+  setLog(S.live? "Finding real flights (preferring 15+ min ETAs for drama)…" : "Drawing two simulated inbound flights…");
   
   let data;
   try {
-    data = S.live ? await liveFlights(S.airport) : simFlights(S.airport);
-    
-    // If live flights don't have origin info, use simulated for better gameplay
-    if(S.live && (!data.A.origin || data.A.origin === "—" || !data.B.origin || data.B.origin === "—")) {
-      console.log("[DL] Live flights missing origin data, using simulated instead");
+    if(S.live) {
+      // Request flights with minimum ETA preference
+      const url = `${LIVE_PROXY}?airport=${encodeURIComponent(S.airport)}&minETA=${MIN_RACE_MINUTES}`;
+      const r = await fetch(url, {cache:"no-store"});
+      if(!r.ok) throw new Error("proxy failed");
+      data = await r.json();
+      
+      // Check if we got good flights with decent ETAs
+      if(data.A && data.B) {
+        const minETA = Math.min(data.A.etaMinutes, data.B.etaMinutes);
+        if(minETA < 10) {
+          console.log("[DL] Flights too close, using simulated for better gameplay");
+          data = simFlights(S.airport);
+          // Make sure simulated flights are far enough out
+          data.A.etaMinutes = 15 + Math.floor(Math.random() * 30);
+          data.B.etaMinutes = 20 + Math.floor(Math.random() * 35);
+          setLog("Live flights too close to airport—using simulated flights for longer race.");
+        }
+      }
+    } else {
       data = simFlights(S.airport);
-      setLog("Live flights lack origin data—using simulated flights for better gameplay.");
+      // Make simulated flights interesting distances
+      data.A.etaMinutes = 15 + Math.floor(Math.random() * 30);
+      data.B.etaMinutes = 20 + Math.floor(Math.random() * 35);
     }
   } catch(e) {
     console.warn("[DL] Flight fetch error:", e);
     data = simFlights(S.airport);
-    setLog("Live unavailable—using simulated flights this round.");
+    data.A.etaMinutes = 15 + Math.floor(Math.random() * 30);
+    data.B.etaMinutes = 20 + Math.floor(Math.random() * 35);
+    setLog("Live unavailable—using simulated flights.");
   }
 
   const destPos = data.destPos || AIRPORTS[S.airport] || null;
