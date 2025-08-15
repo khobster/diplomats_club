@@ -158,6 +158,7 @@ async function ensureRoom(){
     if(!D) return;
     
     const wasRacing = S.racing;
+    const oldChosen = S.chosen;
     
     // Merge remote state to local
     S.bank = {...D.bank};
@@ -171,27 +172,42 @@ async function ensureRoom(){
     S.chosen = D.chosen;
     S.roundSeed = D.roundSeed;
     S.lastWinner = D.lastWinner;
+    S.raceStartTime = D.raceStartTime || null;
     
     updateHUD();
     if(S.dealt) renderDealt();
     
-    // If racing just started and we're not the picker, start the animation
-    if(S.racing && !wasRacing && S.turn !== seat) {
+    // If racing just started (racing is true, wasn't before, and chosen is set)
+    if(S.racing && (!wasRacing || S.chosen !== oldChosen)) {
       const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
       const oppPlayer = S.turn === "K" ? "Cajun" : "Kessler";
       const oppChoice = S.chosen === 'A' ? 'B' : 'A';
-      setLog(`${turnPlayer} picks Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+      
+      // Show who picked what
+      if(seat === S.turn) {
+        setLog(`You picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+      } else {
+        setLog(`${turnPlayer} picked Flight ${S.chosen}! You get Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+      }
+      
+      // Start the race animation for everyone
       startRaceAnimation();
+      
     } else if(S.racing) {
-      setLog("Round in progress…");
-    } else if(S.dealt) {
+      // Race already in progress, maybe we reconnected
+      if(S.raceStartTime) {
+        // Resume the animation from where it should be
+        startRaceAnimation();
+      }
+    } else if(S.dealt && !S.racing) {
+      // Flights dealt, waiting for pick
       if(S.turn === seat) {
         setLog(`Your turn! Pick flight A or B. Your opponent gets the other one.`);
       } else {
         const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
         setLog(`Waiting for ${turnPlayer} to pick a flight...`);
       }
-    } else {
+    } else if(!S.dealt) {
       setLog("Deal flights to start.");
     }
   }, (err) => {
@@ -263,7 +279,10 @@ const K_eyeL = byId("K_eyeL"), K_eyeR = byId("K_eyeR"), K_mouth = byId("K_mouth"
 const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth");
 
 /* =================== Core Config =================== */
-const ROUND_MS = 6500, MIN_BET = 25;
+const MIN_BET = 25;
+// REAL-TIME RACING: 1 minute ETA = 1 actual minute!
+const REAL_TIME_RACING = true; // Set to false for quick 6.5 second races
+const QUICK_RACE_MS = 6500; // Only used if REAL_TIME_RACING is false
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
   YYZ:[43.6777,-79.6248], YUL:[45.4706,-73.7408], YVR:[49.1951,-123.1779],
@@ -286,7 +305,9 @@ const S = {
   dealt: null, destPos:null,
   maps: {A:null, B:null},
   racing:false, chosen:null, roundSeed:null, lastWinner:null,
-  turn:"K"
+  turn:"K",
+  raceStartTime: null,  // Track when race started
+  raceDuration: null    // Track expected race duration
 };
 
 /* =================== Utilities =================== */
@@ -299,16 +320,39 @@ function startRaceAnimation() {
   
   const {A,B} = S.dealt;
   const a = A.etaMinutes, b = B.etaMinutes;
-  const total = ROUND_MS;
-  const Ams = total * (a/(a+b));
-  const Bms = total * (b/(a+b));
-  const t0 = performance.now();
   
-  // Animate progress bars
-  (function step(now){
-    const t = now - t0;
-    const progressA = Math.min(100, (t/Ams)*100);
-    const progressB = Math.min(100, (t/Bms)*100);
+  // Calculate race duration
+  let raceMs;
+  if(REAL_TIME_RACING) {
+    // Real-time: shorter ETA wins first
+    // Race lasts as long as the shorter ETA
+    const winnerMinutes = Math.min(a, b);
+    raceMs = winnerMinutes * 60 * 1000; // Convert minutes to milliseconds
+    
+    setLog(`Racing in REAL TIME! Flight with ${winnerMinutes} min ETA will land in ${winnerMinutes} actual minutes!`);
+  } else {
+    // Quick mode for testing
+    raceMs = QUICK_RACE_MS;
+  }
+  
+  // Store race start time globally so we can resume if needed
+  S.raceStartTime = Date.now();
+  S.raceDuration = raceMs;
+  
+  // Calculate when each flight "finishes"
+  const Ams = REAL_TIME_RACING ? (a * 60 * 1000) : (raceMs * (a/(a+b)));
+  const Bms = REAL_TIME_RACING ? (b * 60 * 1000) : (raceMs * (b/(a+b)));
+  
+  // Show countdown timer
+  const timerEl = byId("log");
+  
+  // Animate progress bars and planes
+  (function step(){
+    const elapsed = Date.now() - S.raceStartTime;
+    
+    // Calculate progress for each flight
+    const progressA = Math.min(100, (elapsed/Ams)*100);
+    const progressB = Math.min(100, (elapsed/Bms)*100);
     
     barA.style.width = progressA.toFixed(1)+"%";
     barB.style.width = progressB.toFixed(1)+"%";
@@ -319,16 +363,24 @@ function startRaceAnimation() {
       updatePlanePosition('B', progressB/100);
     }
     
-    if(t < Ams || t < Bms) {
+    // Show time remaining for leader
+    if(REAL_TIME_RACING && S.racing) {
+      const minRemaining = Math.max(0, Math.min(a, b) - (elapsed / 60000));
+      const seconds = Math.floor((minRemaining % 1) * 60);
+      const minutes = Math.floor(minRemaining);
+      timerEl.textContent = `Race in progress... Time to landing: ${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }
+    
+    // Check if race is still going
+    if(S.racing && (elapsed < Ams || elapsed < Bms)) {
       requestAnimationFrame(step);
-    } else {
-      // Race finished
+    } else if(S.racing) {
+      // Race finished - only the turn player resolves
       if(seat === S.turn) {
-        // Only the player who picked resolves the race
         resolve();
       }
     }
-  })(performance.now());
+  })();
 }
 
 function updatePlanePosition(which, progress) {
@@ -644,6 +696,7 @@ async function start(choice){
   S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, Math.min(S.bank.K, S.bank.C));
   S.chosen = choice;
   S.racing = true;
+  S.raceStartTime = Date.now(); // Track when race started
   
   // Current player gets their choice, opponent gets the other
   const myChoice = choice;
@@ -664,14 +717,15 @@ async function start(choice){
     try {
       await window.firebaseUpdateDoc(roomRef, {
         racing: true,
-        chosen: choice
+        chosen: choice,
+        raceStartTime: S.raceStartTime // Share start time
       });
     } catch(e) {
       console.warn("[DL] room update(start) failed:", e);
     }
   }
   
-  // Start the race animation for ALL players
+  // Start the race animation for the picker
   startRaceAnimation();
 }
 
