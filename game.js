@@ -157,6 +157,8 @@ async function ensureRoom(){
     const D = doc.data();
     if(!D) return;
     
+    const wasRacing = S.racing;
+    
     // Merge remote state to local
     S.bank = {...D.bank};
     S.airport = D.airport;
@@ -173,10 +175,22 @@ async function ensureRoom(){
     updateHUD();
     if(S.dealt) renderDealt();
     
-    if(S.racing) {
+    // If racing just started and we're not the picker, start the animation
+    if(S.racing && !wasRacing && S.turn !== seat) {
+      const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
+      const oppPlayer = S.turn === "K" ? "Cajun" : "Kessler";
+      const oppChoice = S.chosen === 'A' ? 'B' : 'A';
+      setLog(`${turnPlayer} picks Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+      startRaceAnimation();
+    } else if(S.racing) {
       setLog("Round in progress…");
     } else if(S.dealt) {
-      setLog(S.turn === seat ? "Your turn! Pick A or B." : "Waiting for other player...");
+      if(S.turn === seat) {
+        setLog(`Your turn! Pick flight A or B. Your opponent gets the other one.`);
+      } else {
+        const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
+        setLog(`Waiting for ${turnPlayer} to pick a flight...`);
+      }
     } else {
       setLog("Deal flights to start.");
     }
@@ -279,13 +293,99 @@ const S = {
 const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 
-/* =================== FACES ENGINE =================== */
+/* =================== Race Animation =================== */
+function startRaceAnimation() {
+  if(!S.dealt || !S.racing) return;
+  
+  const {A,B} = S.dealt;
+  const a = A.etaMinutes, b = B.etaMinutes;
+  const total = ROUND_MS;
+  const Ams = total * (a/(a+b));
+  const Bms = total * (b/(a+b));
+  const t0 = performance.now();
+  
+  // Animate progress bars
+  (function step(now){
+    const t = now - t0;
+    const progressA = Math.min(100, (t/Ams)*100);
+    const progressB = Math.min(100, (t/Bms)*100);
+    
+    barA.style.width = progressA.toFixed(1)+"%";
+    barB.style.width = progressB.toFixed(1)+"%";
+    
+    // Update map positions to show planes getting closer
+    if(S.maps.A && S.maps.B) {
+      updatePlanePosition('A', progressA/100);
+      updatePlanePosition('B', progressB/100);
+    }
+    
+    if(t < Ams || t < Bms) {
+      requestAnimationFrame(step);
+    } else {
+      // Race finished
+      if(seat === S.turn) {
+        // Only the player who picked resolves the race
+        resolve();
+      }
+    }
+  })(performance.now());
+}
+
+function updatePlanePosition(which, progress) {
+  const M = S.maps[which];
+  if(!M) return;
+  
+  const flight = S.dealt[which];
+  let startPos;
+  
+  // Get starting position
+  if(flight.pos && flight.pos.lat && (flight.pos.lng || flight.pos.lon)) {
+    const lng = flight.pos.lng || flight.pos.lon;
+    startPos = [flight.pos.lat, lng];
+  } else {
+    startPos = guessPos(flight);
+  }
+  
+  // Get destination
+  let destPos;
+  if(S.destPos && S.destPos.lat && (S.destPos.lng || S.destPos.lon)) {
+    const lng = S.destPos.lng || S.destPos.lon;
+    destPos = [S.destPos.lat, lng];
+  } else if(AIRPORTS[flight.dest]) {
+    destPos = AIRPORTS[flight.dest];
+  } else {
+    destPos = [40.6413,-73.7781]; // JFK default
+  }
+  
+  // Interpolate position based on progress
+  const currentLat = startPos[0] + (destPos[0] - startPos[0]) * progress;
+  const currentLng = startPos[1] + (destPos[1] - startPos[1]) * progress;
+  
+  // Update plane marker position
+  M.plane.setLatLng([currentLat, currentLng]);
+}
 function showBubble(which, text, ms=1400){
   const el = which==="K" ? bubK : bubC;
   if(!el) return;
   el.textContent = text;
   el.classList.add("show");
   setTimeout(()=>el.classList.remove("show"), ms);
+}
+
+/* Talk animation */
+function talk(which, on=true){
+  const M = which==="K" ? K_mouth : C_mouth;
+  if(M) M.classList.toggle("talk", on);
+}
+
+/* Eye movement */
+function eyes(which, dir="center"){
+  const dx = dir==="left"? -6 : dir==="right" ? 6 : 0;
+  const [L,R] = which==="K" ? [K_eyeL, K_eyeR] : [C_eyeL, C_eyeR];
+  if(L && R) {
+    L.style.transform = `translate(${dx}px,0)`;
+    R.style.transform = `translate(${dx}px,0)`;
+  }
 }
 
 /* Blink loop */
@@ -472,14 +572,25 @@ async function deal(){
   etaA.textContent="";
   etaB.textContent="";
 
-  showBubble("K","New action!");
-  showBubble("C","Name your flight!");
+  // Character reactions
+  showBubble("K","New round!");
+  showBubble("C","Let's go!");
+  talk("K",true);
+  talk("C",true);
+  setTimeout(()=>{talk("K",false); talk("C",false);}, 900);
 
   setLog(S.live? "Pulling two inbound real flights…" : "Drawing two simulated inbound flights…");
   
   let data;
   try {
     data = S.live ? await liveFlights(S.airport) : simFlights(S.airport);
+    
+    // If live flights don't have origin info, use simulated for better gameplay
+    if(S.live && (!data.A.origin || data.A.origin === "—" || !data.B.origin || data.B.origin === "—")) {
+      console.log("[DL] Live flights missing origin data, using simulated instead");
+      data = simFlights(S.airport);
+      setLog("Live flights lack origin data—using simulated flights for better gameplay.");
+    }
   } catch(e) {
     console.warn("[DL] Flight fetch error:", e);
     data = simFlights(S.airport);
@@ -494,7 +605,15 @@ async function deal(){
   S.roundSeed = Math.floor(Math.random()*1e9);
 
   renderDealt();
-  setLog(S.turn === seat ? "Your turn! Click A or B to place your bet." : "Waiting for other player to choose...");
+  
+  // Show whose turn it is
+  const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
+  if(S.turn === seat) {
+    setLog(`${turnPlayer}'s turn! Pick flight A or B. Your opponent gets the other one.`);
+    showBubble(S.turn, "My pick!");
+  } else {
+    setLog(`Waiting for ${turnPlayer} to pick a flight...`);
+  }
 
   if(roomRef){
     try {
@@ -515,34 +634,32 @@ async function start(choice){
     showBubble("K","Join a seat to play!");
     return;
   }
+  
+  // Only the player whose turn it is can pick
   if(S.turn!==seat){ 
-    showBubble(seat,"Hold—other player's turn");
+    // Don't allow the other player to pick
     return;
   }
 
   S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, Math.min(S.bank.K, S.bank.C));
   S.chosen = choice;
   S.racing = true;
-
-  setLog(`${seat==="K"?"Kessler":"Cajun"} bets ${fmtSirig(S.bet)} on Flight ${choice}.`);
-
-  // Start the race animation
-  const {A,B} = S.dealt;
-  const a=A.etaMinutes, b=B.etaMinutes, total=ROUND_MS;
-  const Ams = total * (a/(a+b)), Bms = total * (b/(a+b));
-  const t0 = performance.now();
   
-  (function step(now){
-    const t = now - t0;
-    barA.style.width = Math.min(100, (t/Ams)*100).toFixed(1)+"%";
-    barB.style.width = Math.min(100, (t/Bms)*100).toFixed(1)+"%";
-    if(t<Ams || t<Bms) {
-      requestAnimationFrame(step);
-    } else {
-      resolve();
-    }
-  })(performance.now());
+  // Current player gets their choice, opponent gets the other
+  const myChoice = choice;
+  const oppChoice = choice === 'A' ? 'B' : 'A';
+  const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
+  const oppPlayer = S.turn === "K" ? "Cajun" : "Kessler";
+  
+  setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+  
+  // Character reactions
+  eyes(S.turn, choice === 'A' ? "left" : "right");
+  setTimeout(()=>eyes(S.turn, "center"), 600);
+  talk(S.turn, true);
+  setTimeout(()=>talk(S.turn, false), 800);
 
+  // Update Firebase so both players see the race
   if(roomRef){
     try {
       await window.firebaseUpdateDoc(roomRef, {
@@ -553,6 +670,9 @@ async function start(choice){
       console.warn("[DL] room update(start) failed:", e);
     }
   }
+  
+  // Start the race animation for ALL players
+  startRaceAnimation();
 }
 
 async function resolve(){
@@ -560,32 +680,45 @@ async function resolve(){
   const tie = (A.etaMinutes===B.etaMinutes);
   const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
 
-  const youPicked = S.chosen;
-  const youWon = (youPicked===winner);
+  // Figure out who picked what
+  const turnPlayer = S.turn; // Who picked this round
+  const oppPlayer = S.turn === "K" ? "C" : "K";
+  const turnChoice = S.chosen;
+  const oppChoice = S.chosen === 'A' ? 'B' : 'A';
+  
+  // Who won?
+  const turnWon = (turnChoice === winner);
+  const winnerPlayer = turnWon ? turnPlayer : oppPlayer;
+  const loserPlayer = turnWon ? oppPlayer : turnPlayer;
 
-  const me = seat;
-  const opp = seat==="K" ? "C" : "K";
-
-  if(youWon){
-    S.bank[me]+=S.bet;
-    S.bank[opp]-=S.bet;
-    setLog(`WIN! Flight ${winner} arrived first — ${fmtSirig(S.bet)} to ${me==="K"?"Kessler":"Cajun"}.`);
-    showBubble(me,"YES!", 900);
-  }else{
-    S.bank[me]-=S.bet;
-    S.bank[opp]+=S.bet;
-    setLog(`Lost. Flight ${winner} beat your pick — ${fmtSirig(S.bet)} to ${opp==="K"?"Kessler":"Cajun"}.`);
-    showBubble(opp,"Ha!", 900);
-  }
+  // Update banks
+  S.bank[winnerPlayer] += S.bet;
+  S.bank[loserPlayer] -= S.bet;
+  
+  // Announce results
+  const winnerName = winnerPlayer === "K" ? "Kessler" : "Cajun";
+  const loserName = loserPlayer === "K" ? "Kessler" : "Cajun";
+  setLog(`Flight ${winner} wins! ${winnerName} takes ${fmtSirig(S.bet)} from ${loserName}.`);
+  
+  // Character reactions - winner celebrates, loser reacts
+  showBubble(winnerPlayer, "YES!", 1200);
+  showBubble(loserPlayer, "Ugh!", 1200);
+  
+  // Animate mouths (smile/frown would need SVG changes)
+  talk(winnerPlayer, true);
+  setTimeout(() => talk(winnerPlayer, false), 1000);
+  
+  eyes(loserPlayer, "left");
+  setTimeout(() => eyes(loserPlayer, "center"), 800);
 
   bankK.textContent = fmtSirig(S.bank.K);
   bankC.textContent = fmtSirig(S.bank.C);
   S.racing=false;
   S.lastWinner = winner;
-  S.turn = (S.turn==="K"?"C":"K");
+  S.turn = (S.turn==="K"?"C":"K"); // Alternate turns
   
-  if(S.bank.K<=0) setLog("Kessler is busted!");
-  if(S.bank.C<=0) setLog("The Cajun is busted!");
+  if(S.bank.K<=0) setLog("Kessler is busted! Game over!");
+  if(S.bank.C<=0) setLog("The Cajun is busted! Game over!");
 
   if(roomRef){
     try {
