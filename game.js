@@ -1,4 +1,4 @@
-/* Diplomat's Lounge — Always-live version + fair longshot payouts */
+/* Diplomat's Lounge — Always-live + fair longshot payouts + compact UI */
 
 /* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
@@ -22,7 +22,13 @@ function randomCode(n=6){
   return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); 
 }
 function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
-function setSeatLabel(s){ seatName.textContent = s==="K"?"Kessler":(s==="C"?"Cajun":"Solo"); }
+
+/* === Name mapping: seat codes -> display names ===
+   Left person on sofa is seat "K" but is actually "Cajun";
+   Right person is seat "C" but is "Kessler". */
+const N = { K: "Cajun", C: "Kessler" };
+const nameOf = (s) => N[s] || "Solo";
+function setSeatLabel(s){ seatName.textContent = nameOf(s); }
 
 /* ===== Error handling ===== */
 function showError(msg){
@@ -76,7 +82,7 @@ async function ensureRoom(){
       await window.firebaseSetDoc(roomRef, {
         createdAt: Date.now(),
         seats: {K:"", C:""},
-        bank: {K:0, C:0},              // ← start even
+        bank: {K:0, C:0},              // start even
         airport:"JFK", bet:50, live:true,
         dealt:null, destPos:null,
         racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
@@ -126,8 +132,8 @@ async function ensureRoom(){
     if(S.dealt) renderDealt();
 
     if(S.racing && (!wasRacing || S.chosen !== oldChosen)){
-      const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
-      const oppPlayer = S.turn === "K" ? "Cajun" : "Kessler";
+      const turnPlayer = nameOf(S.turn);
+      const oppPlayer  = nameOf(S.turn === "K" ? "C" : "K");
       const oppChoice = S.chosen === 'A' ? 'B' : 'A';
       setLog(`${turnPlayer} picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${S.bet}${S.odds && S.odds[S.odds.long] ? ` (longshot pays ${S.odds.mult.toFixed(2)}×)` : ""}!`);
       startRaceAnimation();
@@ -135,7 +141,7 @@ async function ensureRoom(){
       if(S.raceStartTime) startRaceAnimation();
     }else if(S.dealt && !S.racing){
       if(S.turn === seat) setLog("Your turn! Pick flight A or B. Your opponent gets the other one.");
-      else setLog(`Waiting for ${S.turn === "K" ? "Kessler" : "Cajun"} to pick a flight...`);
+      else setLog(`Waiting for ${nameOf(S.turn)} to pick a flight...`);
     }else{
       setLog("Deal flights to start.");
     }
@@ -152,7 +158,7 @@ async function createRoom(){
     await window.firebaseSetDoc(newRoomRef, {
       createdAt: Date.now(),
       seats: {K:"", C:""},
-      bank: {K:0, C:0},            // ← start even
+      bank: {K:0, C:0},            // start even
       airport:"JFK", bet:50, live:true,
       dealt:null, destPos:null,
       racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
@@ -181,6 +187,7 @@ const mapA = byId("mapA"), mapB = byId("mapB");
 const dealBtn = byId("deal"), resetBtn = byId("reset");
 const airportIn = byId("airport"), betIn = byId("betIn");
 const bankK = byId("bankK"), bankC = byId("bankC");
+const nameKEl = byId("nameK"), nameCEl = byId("nameC");
 const bubK = byId("bubK"), bubC = byId("bubC");
 
 /* Sofa face nodes */
@@ -190,7 +197,7 @@ const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth"
 /* =================== Config =================== */
 const MIN_BET = 25;
 const REAL_TIME_RACING = true;
-const LIVE_UPDATE_INTERVAL = 3 * 60 * 1000;
+const LIVE_UPDATE_INTERVAL = 3 * 60 * 1000; // 3 minutes
 const MIN_RACE_MINUTES = 15;
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
@@ -274,6 +281,7 @@ function startRaceAnimation(){
 
   let updateInterval=null;
   if(REAL_TIME_RACING && S.live){
+    // First update after 60s, then every 3 minutes
     setTimeout(()=>updateLivePositions(), 60000);
     updateInterval = setInterval(()=>updateLivePositions(), LIVE_UPDATE_INTERVAL);
   }
@@ -429,7 +437,11 @@ async function liveFlights(iata){
 
 /* =================== HUD / Update =================== */
 function updateHUD(){
-  const kEl = byId("bankK"), cEl = byId("bankC");
+  // Names next to bank (left = Cajun, right = Kessler)
+  if(nameKEl) nameKEl.textContent = nameOf('K');
+  if(nameCEl) nameCEl.textContent = nameOf('C');
+
+  const kEl = bankK, cEl = bankC;
   kEl.textContent = fmtMoney(S.bank.K);
   cEl.textContent = fmtMoney(S.bank.C);
   kEl.className = S.bank.K > 0 ? "you" : S.bank.K < 0 ? "opp" : "zero";
@@ -438,10 +450,11 @@ function updateHUD(){
   betIn.value = S.bet;
   airportIn.value = S.airport;
 
-  // Win condition callouts
-  if(S.bank.K >= 5000 && S.bank.C <= -5000) setLog("🎉 KESSLER WINS THE GAME! +$5,000 vs -$5,000!");
-  else if(S.bank.C >= 5000 && S.bank.K <= -5000) setLog("🎉 CAJUN WINS THE GAME! +$5,000 vs -$5,000!");
+  // Win condition callouts (use mapped names)
+  if(S.bank.K >= 5000 && S.bank.C <= -5000) setLog(`🎉 ${nameOf('K').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
+  else if(S.bank.C >= 5000 && S.bank.K <= -5000) setLog(`🎉 ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
 }
+
 function renderDealt(){
   const {A,B} = S.dealt;
   const originA = A.origin !== "—" ? A.origin : "???";
@@ -456,8 +469,20 @@ function renderDealt(){
   cardB.querySelectorAll('.picker-badge').forEach(b => b.remove());
   cardA.className = "card"; cardB.className = "card";
 
-  if(S.pickedBy.A){ const badge = document.createElement('div'); badge.className=`picker-badge ${S.pickedBy.A.toLowerCase()}`; badge.textContent = S.pickedBy.A==="K"?"Kessler's":"Cajun's"; cardA.classList.add(`picked-${S.pickedBy.A.toLowerCase()}`); cardA.appendChild(badge); }
-  if(S.pickedBy.B){ const badge = document.createElement('div'); badge.className=`picker-badge ${S.pickedBy.B.toLowerCase()}`; badge.textContent = S.pickedBy.B==="K"?"Kessler's":"Cajun's"; cardB.classList.add(`picked-${S.pickedBy.B.toLowerCase()}`); cardB.appendChild(badge); }
+  if(S.pickedBy.A){
+    cardA.classList.add(`picked-${S.pickedBy.A.toLowerCase()}`);
+    const badge = document.createElement('div');
+    badge.className = `picker-badge ${S.pickedBy.A.toLowerCase()}`;
+    badge.textContent = `${nameOf(S.pickedBy.A)}'s`;
+    cardA.appendChild(badge);
+  }
+  if(S.pickedBy.B){
+    cardB.classList.add(`picked-${S.pickedBy.B.toLowerCase()}`);
+    const badge = document.createElement('div');
+    badge.className = `picker-badge ${S.pickedBy.B.toLowerCase()}`;
+    badge.textContent = `${nameOf(S.pickedBy.B)}'s`;
+    cardB.appendChild(badge);
+  }
 
   try{ const da = fitAndRender('A', A, S.destPos); etaA.textContent += ` — ~${da} km`; }catch(e){ console.warn("[DL] Map A render error:", e); }
   try{ const db = fitAndRender('B', B, S.destPos); etaB.textContent += ` — ~${db} km`; }catch(e){ console.warn("[DL] Map B render error:", e); }
@@ -469,7 +494,7 @@ async function deal(){
   if(seat!=="K" && seat!=="C"){ showBubble("K","Join a seat to play!"); return; }
 
   S.airport = (airportIn.value||"JFK").toUpperCase();
-  // Bet is a base stake; banks can go negative (that’s the game design)
+  // Bet is a base stake; banks can go negative (game design)
   S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, 1e9);
   S.live = true;
 
@@ -518,7 +543,7 @@ async function deal(){
   renderDealt();
 
   if(S.turn === seat){ setLog("Your turn! Pick flight A or B. Your opponent gets the other one."); showBubble(S.turn, "My pick!"); }
-  else { setLog(`Waiting for ${S.turn === "K" ? "Kessler" : "Cajun"} to pick a flight...`); }
+  else { setLog(`Waiting for ${nameOf(S.turn)} to pick a flight...`); }
 
   if(roomRef){
     try{
@@ -557,8 +582,8 @@ async function start(choice){
   S.pickedBy.B = choice === 'B' ? S.turn : (S.turn === "K" ? "C" : "K");
 
   const myChoice = choice, oppChoice = choice === 'A' ? 'B' : 'A';
-  const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
-  const oppPlayer  = S.turn === "K" ? "Cajun"  : "Kessler";
+  const turnPlayer = nameOf(S.turn);
+  const oppPlayer  = nameOf(S.turn === "K" ? "C" : "K");
 
   if(choice === longFlight){ showBubble(S.turn, `Longshot pays ${mult.toFixed(2)}×`, 1600); }
 
@@ -588,7 +613,6 @@ async function resolve(){
   const turnPlayer = S.turn;
   const oppPlayer  = S.turn === "K" ? "C" : "K";
   const turnChoice = S.chosen;
-  const oppChoice  = S.chosen === 'A' ? 'B' : 'A';
 
   const turnWon = (turnChoice === winner);
   const winnerPlayer = turnWon ? turnPlayer : oppPlayer;
@@ -602,8 +626,8 @@ async function resolve(){
   S.bank[winnerPlayer] += payout;
   S.bank[loserPlayer]  -= payout;
 
-  const winnerName = winnerPlayer === "K" ? "Kessler" : "Cajun";
-  const loserName  = loserPlayer  === "K" ? "Kessler" : "Cajun";
+  const winnerName = nameOf(winnerPlayer);
+  const loserName  = nameOf(loserPlayer);
   const bonusText  = winner === long ? ` (longshot ${mult.toFixed(2)}×)` : "";
 
   setLog(`Flight ${winner} wins! ${winnerName} takes ${payout.toLocaleString()} from ${loserName}${bonusText}.`);
@@ -622,10 +646,10 @@ async function resolve(){
   S.pickedBy = {A:null, B:null};
 
   if(S.bank.K >= 5000 && S.bank.C <= -5000){
-    setLog("🎉 KESSLER WINS THE GAME! +$5,000 vs -$5,000! 🎉");
+    setLog(`🎉 ${nameOf('K').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000! 🎉`);
     showBubble("K","I'm the champion!",3000); showBubble("C","Good game!",3000);
   }else if(S.bank.C >= 5000 && S.bank.K <= -5000){
-    setLog("🎉 CAJUN WINS THE GAME! +$5,000 vs -$5,000! 🎉");
+    setLog(`🎉 ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000! 🎉`);
     showBubble("C","Victory is mine!",3000); showBubble("K","Well played!",3000);
   }
 
@@ -642,7 +666,7 @@ async function resolve(){
 /* =================== Events =================== */
 byId("A").addEventListener("click", ()=> start('A'));
 byId("B").addEventListener("click", ()=> start('B'));
-byId("deal").addEventListener("click", deal);
+dealBtn.addEventListener("click", deal);
 
 resetBtn.addEventListener("click", async ()=>{
   S.bank={K:0,C:0}; updateHUD();
@@ -662,10 +686,15 @@ copyBtn.addEventListener("click", copyInvite);
 
 /* =================== Init =================== */
 (async function init(){
+  // Set static name labels under the bank (left/right)
+  if(nameKEl) nameKEl.textContent = nameOf('K');
+  if(nameCEl) nameCEl.textContent = nameOf('C');
+
   setSeatLabel(seat);
   updateHUD();
   startBlinking();
 
+  // Load the sofa image (optional)
   const img = new Image();
   img.onload = function(){
     const stage = byId("stage");
@@ -673,7 +702,7 @@ copyBtn.addEventListener("click", copyInvite);
     if(placeholder) placeholder.remove();
     const actualImg = document.createElement("img");
     actualImg.src = "./sofawithkesslerandcajun.png";
-    actualImg.alt = "Kessler and the Cajun on a sofa";
+    actualImg.alt = "Cajun and Kessler on a sofa";
     stage.insertBefore(actualImg, stage.firstChild);
     const faceSvg = stage.querySelector(".faces");
     if(faceSvg) faceSvg.style.display = "block";
@@ -683,5 +712,6 @@ copyBtn.addEventListener("click", copyInvite);
 
   await initFirebase();
   await ensureRoom();
+
   setLog("Welcome to the Diplomat's Lounge. Deal flights to start.");
 })();
