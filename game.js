@@ -1,4 +1,7 @@
-/* Diplomat's Lounge — Fixed version with proper Firebase integration */
+async function resolve(){
+  const {A,B}=S.dealt;
+  const tie = (A.etaMinutes===B.etaMinutes);
+  const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (A.etaMinutes/* Diplomat's Lounge — Fixed version with proper Firebase integration */
 
 /* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
@@ -115,10 +118,11 @@ async function ensureRoom(){
       await window.firebaseSetDoc(roomRef, {
         createdAt: Date.now(),
         seats: {K:"", C:""},
-        bank: {K:500, C:2000},
+        bank: {K:0, C:0},  // Start at 0
         airport:"JFK", bet:50, live:false,
         dealt:null, destPos:null,
-        racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null
+        racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
+        pickedBy: {A:null, B:null}
       });
       console.log("[DL] Room created:", roomId);
     } catch(e) { 
@@ -173,6 +177,7 @@ async function ensureRoom(){
     S.roundSeed = D.roundSeed;
     S.lastWinner = D.lastWinner;
     S.raceStartTime = D.raceStartTime || null;
+    S.pickedBy = D.pickedBy || {A:null, B:null};
     
     updateHUD();
     if(S.dealt) renderDealt();
@@ -185,9 +190,9 @@ async function ensureRoom(){
       
       // Show who picked what
       if(seat === S.turn) {
-        setLog(`You picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+        setLog(`You picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${S.bet}!`);
       } else {
-        setLog(`${turnPlayer} picked Flight ${S.chosen}! You get Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+        setLog(`${turnPlayer} picked Flight ${S.chosen}! You get Flight ${oppChoice}. Racing for ${S.bet}!`);
       }
       
       // Start the race animation for everyone
@@ -300,19 +305,23 @@ const AIRPORTS = {
 
 /* =================== State =================== */
 const S = {
-  bank: {K:500, C:2000},
+  bank: {K:0, C:0},  // Start at 0 for both players
   airport: "JFK",
   bet: 50, live:false,
   dealt: null, destPos:null,
   maps: {A:null, B:null},
   racing:false, chosen:null, roundSeed:null, lastWinner:null,
   turn:"K",
-  raceStartTime: null,  // Track when race started
-  raceDuration: null    // Track expected race duration
+  raceStartTime: null,
+  raceDuration: null,
+  pickedBy: {A:null, B:null}  // Track who picked which flight
 };
 
 /* =================== Utilities =================== */
-const fmtSirig = (n)=>`${n.toLocaleString()} sirignanos`;
+const fmtMoney = (n)=> {
+  const sign = n >= 0 ? '+' : '';
+  return `${sign}${Math.abs(n).toLocaleString()}`;
+};
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 
 /* =================== Live Flight Updates =================== */
@@ -662,12 +671,28 @@ async function liveFlights(iata){
 
 /* =================== HUD / Update =================== */
 function updateHUD(){
-  bankK.textContent = fmtSirig(S.bank.K);
-  bankC.textContent = fmtSirig(S.bank.C);
+  // Update bank displays with color coding
+  const kEl = byId("bankK");
+  const cEl = byId("bankC");
+  
+  kEl.textContent = fmtMoney(S.bank.K);
+  cEl.textContent = fmtMoney(S.bank.C);
+  
+  // Color code based on value
+  kEl.className = S.bank.K > 0 ? "you" : S.bank.K < 0 ? "opp" : "zero";
+  cEl.className = S.bank.C > 0 ? "you" : S.bank.C < 0 ? "opp" : "zero";
+  
   betIn.value = S.bet;
   airportIn.value = S.airport;
   liveToggle.checked = S.live;
   dealBtn.disabled = !!(S.racing) || (seat!=="K" && seat!=="C");
+  
+  // Check for win condition
+  if(S.bank.K >= 5000 && S.bank.C <= -5000) {
+    setLog("🎉 KESSLER WINS THE GAME! +$5,000 vs -$5,000!");
+  } else if(S.bank.C >= 5000 && S.bank.K <= -5000) {
+    setLog("🎉 CAJUN WINS THE GAME! +$5,000 vs -$5,000!");
+  }
 }
 
 function renderDealt(){
@@ -681,6 +706,32 @@ function renderDealt(){
   lineB.textContent = `B — ${originB} → ${B.dest} (${B.callsign})`;
   etaA.textContent = `ETA ~ ${A.etaMinutes} min`;
   etaB.textContent = `ETA ~ ${B.etaMinutes} min`;
+  
+  // Show who picked what with visual indicators
+  const cardA = byId("A");
+  const cardB = byId("B");
+  
+  // Remove old badges
+  cardA.querySelectorAll('.picker-badge').forEach(b => b.remove());
+  cardB.querySelectorAll('.picker-badge').forEach(b => b.remove());
+  cardA.className = "card";
+  cardB.className = "card";
+  
+  if(S.pickedBy.A) {
+    cardA.className = `card picked-${S.pickedBy.A.toLowerCase()}`;
+    const badge = document.createElement('div');
+    badge.className = `picker-badge ${S.pickedBy.A.toLowerCase()}`;
+    badge.textContent = S.pickedBy.A === "K" ? "Kessler's" : "Cajun's";
+    cardA.appendChild(badge);
+  }
+  
+  if(S.pickedBy.B) {
+    cardB.className = `card picked-${S.pickedBy.B.toLowerCase()}`;
+    const badge = document.createElement('div');
+    badge.className = `picker-badge ${S.pickedBy.B.toLowerCase()}`;
+    badge.textContent = S.pickedBy.B === "K" ? "Kessler's" : "Cajun's";
+    cardB.appendChild(badge);
+  }
   
   try {
     const da = fitAndRender('A', A, S.destPos);
@@ -800,14 +851,31 @@ async function start(choice){
   
   // Only the player whose turn it is can pick
   if(S.turn!==seat){ 
-    // Don't allow the other player to pick
     return;
   }
 
-  S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, Math.min(S.bank.K, S.bank.C));
+  // Calculate dynamic bet based on ETA difference (reward for picking longshot)
+  const {A,B} = S.dealt;
+  const etaDiff = Math.abs(A.etaMinutes - B.etaMinutes);
+  const longerFlight = A.etaMinutes > B.etaMinutes ? 'A' : 'B';
+  const baseBet = Number(betIn.value || 50);
+  
+  // If you pick the longer ETA flight, you get bonus multiplier
+  let finalBet = baseBet;
+  if(choice === longerFlight && etaDiff > 5) {
+    const multiplier = 1 + (etaDiff / 20); // Up to 2x for 20+ min difference
+    finalBet = Math.round(baseBet * multiplier);
+    showBubble(S.turn, `Longshot bonus! ${multiplier.toFixed(1)}x`);
+  }
+  
+  S.bet = finalBet;
   S.chosen = choice;
   S.racing = true;
-  S.raceStartTime = Date.now(); // Track when race started
+  S.raceStartTime = Date.now();
+  
+  // Track who picked what
+  S.pickedBy.A = choice === 'A' ? S.turn : (S.turn === "K" ? "C" : "K");
+  S.pickedBy.B = choice === 'B' ? S.turn : (S.turn === "K" ? "C" : "K");
   
   // Current player gets their choice, opponent gets the other
   const myChoice = choice;
@@ -815,13 +883,17 @@ async function start(choice){
   const turnPlayer = S.turn === "K" ? "Kessler" : "Cajun";
   const oppPlayer = S.turn === "K" ? "Cajun" : "Kessler";
   
-  setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${fmtSirig(S.bet)}!`);
+  setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${finalBet}!`);
   
-  // Character reactions
+  // Character reactions - more expressive
   eyes(S.turn, choice === 'A' ? "left" : "right");
-  setTimeout(()=>eyes(S.turn, "center"), 600);
   talk(S.turn, true);
-  setTimeout(()=>talk(S.turn, false), 800);
+  byId(S.turn + "_mouth").classList.add("smile");
+  setTimeout(()=>{
+    eyes(S.turn, "center");
+    talk(S.turn, false);
+    byId(S.turn + "_mouth").classList.remove("smile");
+  }, 1200);
 
   // Update Firebase so both players see the race
   if(roomRef){
@@ -829,12 +901,17 @@ async function start(choice){
       await window.firebaseUpdateDoc(roomRef, {
         racing: true,
         chosen: choice,
-        raceStartTime: S.raceStartTime // Share start time
+        bet: finalBet,
+        raceStartTime: S.raceStartTime,
+        pickedBy: S.pickedBy
       });
     } catch(e) {
       console.warn("[DL] room update(start) failed:", e);
     }
   }
+  
+  // Re-render to show who picked what
+  renderDealt();
   
   // Start the race animation for the picker
   startRaceAnimation();
@@ -863,32 +940,50 @@ async function resolve(){
   // Announce results
   const winnerName = winnerPlayer === "K" ? "Kessler" : "Cajun";
   const loserName = loserPlayer === "K" ? "Kessler" : "Cajun";
-  setLog(`Flight ${winner} wins! ${winnerName} takes ${fmtSirig(S.bet)} from ${loserName}.`);
+  setLog(`Flight ${winner} wins! ${winnerName} takes ${S.bet} from ${loserName}.`);
   
-  // Character reactions - winner celebrates, loser reacts
-  showBubble(winnerPlayer, "YES!", 1200);
-  showBubble(loserPlayer, "Ugh!", 1200);
+  // Character reactions - more expressive
+  showBubble(winnerPlayer, "YES! Got it!", 1500);
+  showBubble(loserPlayer, "Damn!", 1200);
   
-  // Animate mouths (smile/frown would need SVG changes)
+  // Winner celebrates
   talk(winnerPlayer, true);
-  setTimeout(() => talk(winnerPlayer, false), 1000);
+  byId(winnerPlayer + "_mouth").classList.add("smile");
+  setTimeout(() => {
+    talk(winnerPlayer, false);
+    byId(winnerPlayer + "_mouth").classList.remove("smile");
+  }, 1500);
   
+  // Loser reacts
+  byId(loserPlayer + "_mouth").classList.add("frown");
   eyes(loserPlayer, "left");
-  setTimeout(() => eyes(loserPlayer, "center"), 800);
+  setTimeout(() => {
+    eyes(loserPlayer, "center");
+    byId(loserPlayer + "_mouth").classList.remove("frown");
+  }, 1200);
 
-  bankK.textContent = fmtSirig(S.bank.K);
-  bankC.textContent = fmtSirig(S.bank.C);
+  updateHUD();
   S.racing=false;
   S.lastWinner = winner;
   S.turn = (S.turn==="K"?"C":"K"); // Alternate turns
+  S.pickedBy = {A:null, B:null}; // Reset picks
   
-  if(S.bank.K<=0) setLog("Kessler is busted! Game over!");
-  if(S.bank.C<=0) setLog("The Cajun is busted! Game over!");
+  // Check win conditions
+  if(S.bank.K >= 5000 && S.bank.C <= -5000) {
+    setLog("🎉 KESSLER WINS THE GAME! +$5,000 vs -$5,000! 🎉");
+    showBubble("K", "I'm the champion!", 3000);
+    showBubble("C", "Good game!", 3000);
+  } else if(S.bank.C >= 5000 && S.bank.K <= -5000) {
+    setLog("🎉 CAJUN WINS THE GAME! +$5,000 vs -$5,000! 🎉");
+    showBubble("C", "Victory is mine!", 3000);
+    showBubble("K", "Well played!", 3000);
+  }
 
   if(roomRef){
     try {
       await window.firebaseUpdateDoc(roomRef, {
-        bank:S.bank, racing:false, chosen:null, lastWinner:winner, turn:S.turn
+        bank:S.bank, racing:false, chosen:null, lastWinner:winner, 
+        turn:S.turn, pickedBy:{A:null, B:null}
       });
     } catch(e) {
       console.warn("[DL] room update(resolve) failed:", e);
@@ -902,10 +997,9 @@ byId("B").addEventListener("click", ()=> start('B'));
 dealBtn.addEventListener("click", deal);
 
 resetBtn.addEventListener("click", async ()=>{
-  S.bank={K:500,C:2000};
-  bankK.textContent=fmtSirig(S.bank.K);
-  bankC.textContent=fmtSirig(S.bank.C);
-  setLog("Bank reset.");
+  S.bank={K:0,C:0}; // Reset to 0
+  updateHUD();
+  setLog("Bank reset. First to +$5,000 (with opponent at -$5,000) wins!");
   if(roomRef){
     try {
       await window.firebaseUpdateDoc(roomRef, {bank:S.bank});
