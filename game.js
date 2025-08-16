@@ -1,4 +1,4 @@
-/* Diplomat's Lounge — Always-live + fair longshot payouts + compact UI */
+/* Diplomat's Lounge — Always-live + fair longshot payouts + compact UI + Δ flicker fix */
 
 /* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
@@ -132,6 +132,13 @@ async function ensureRoom(){
     if(S.dealt) renderDealt();
 
     if(S.racing && (!wasRacing || S.chosen !== oldChosen)){
+      // Initialize baselines locally if they aren't yet
+      if (!S.etaBaselineTime) {
+        S.etaBaseline = { A: S.dealt?.A?.etaMinutes ?? 0, B: S.dealt?.B?.etaMinutes ?? 0 };
+        S.etaBaselineTime = S.raceStartTime || Date.now();
+        S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
+      }
+
       const turnPlayer = nameOf(S.turn);
       const oppPlayer  = nameOf(S.turn === "K" ? "C" : "K");
       const oppChoice = S.chosen === 'A' ? 'B' : 'A';
@@ -197,7 +204,7 @@ const C_eyeL = byId("C_eyeL"), C_eyeR = byId("C_eyeR"), C_mouth = byId("C_mouth"
 /* =================== Config =================== */
 const MIN_BET = 25;
 const REAL_TIME_RACING = true;
-const LIVE_UPDATE_INTERVAL = 3 * 60 * 1000; // 3 minutes
+const LIVE_UPDATE_INTERVAL = 3 * 60 * 1000; // 3 minutes (first ping after 60s)
 const MIN_RACE_MINUTES = 15;
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
@@ -225,7 +232,14 @@ const S = {
   raceStartTime: null,
   raceDuration: null,
   pickedBy: {A:null, B:null},
-  odds: null              // {A:1, B:1, long:'A'|'B', mult:Number}
+  odds: null,              // {A:1, B:1, long:'A'|'B', mult:Number}
+
+  // Δ flicker fix: countdown baselines and smoothing
+  etaBaseline: { A: null, B: null },
+  etaBaselineTime: null,
+  _lastBannerUpdate: 0,
+  _stableLeader: null,
+  _leaderLockUntil: 0
 };
 
 /* =================== Utilities =================== */
@@ -251,12 +265,26 @@ async function updateLivePositions() {
     let updatedB = data.tracked?.find(f=>f.callsign===flightB.callsign) || (data.B?.callsign===flightB.callsign?data.B:null);
 
     let updated=false;
-    if(updatedA?.pos){ S.dealt.A.pos = updatedA.pos; S.dealt.A.etaMinutes = updatedA.etaMinutes; showBubble("K", `Flight A: ${updatedA.etaMinutes} min!`, 2000); updated=true; }
-    if(updatedB?.pos){ S.dealt.B.pos = updatedB.pos; S.dealt.B.etaMinutes = updatedB.etaMinutes; showBubble("C", `Flight B: ${updatedB.etaMinutes} min!`, 2000); updated=true; }
+    if(updatedA?.pos){
+      S.dealt.A.pos = updatedA.pos;
+      S.dealt.A.etaMinutes = updatedA.etaMinutes;
+      updated = true;
+      showBubble("K", `Flight A: ${updatedA.etaMinutes} min!`, 2000);
+    }
+    if(updatedB?.pos){
+      S.dealt.B.pos = updatedB.pos;
+      S.dealt.B.etaMinutes = updatedB.etaMinutes;
+      updated = true;
+      showBubble("C", `Flight B: ${updatedB.etaMinutes} min!`, 2000);
+    }
 
     if(updated){
+      // Reset countdown baseline to the newest ETAs (prevents double-subtract)
+      S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
+      S.etaBaselineTime = Date.now();
+
       renderDealt();
-      if(roomRef){ await window.firebaseUpdateDoc(roomRef, {dealt:S.dealt}).catch(()=>{}); }
+      if(roomRef){ await window.firebaseUpdateDoc(roomRef, { dealt: S.dealt }).catch(()=>{}); }
     }
   }catch(e){ console.warn("[DL] Live position update failed:", e); }
 }
@@ -276,8 +304,15 @@ function startRaceAnimation(){
     raceMs = 6500;
   }
 
-  S.raceStartTime = Date.now();
+  if (!S.raceStartTime) S.raceStartTime = Date.now();
   S.raceDuration = raceMs;
+
+  // Initialize baseline on viewers who joined mid-race
+  if (!S.etaBaselineTime) {
+    S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
+    S.etaBaselineTime = S.raceStartTime;
+    S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
+  }
 
   let updateInterval=null;
   if(REAL_TIME_RACING && S.live){
@@ -295,28 +330,52 @@ function startRaceAnimation(){
     const currentA = S.dealt.A.etaMinutes;
     const currentB = S.dealt.B.etaMinutes;
 
+    // Progress bars (keep original feel; small step when new ETA arrives)
     const progressA = Math.min(100, (elapsed / (currentA * 60 * 1000)) * 100);
     const progressB = Math.min(100, (elapsed / (currentB * 60 * 1000)) * 100);
-
     barA.style.width = progressA.toFixed(1)+"%";
     barB.style.width = progressB.toFixed(1)+"%";
 
+    // Map positions
     if(S.maps.A && S.maps.B){
       if(S.dealt.A.pos){ const p=S.dealt.A.pos; S.maps.A.plane.setLatLng([p.lat, p.lng||p.lon]); } else { updatePlanePosition('A', progressA/100); }
       if(S.dealt.B.pos){ const p=S.dealt.B.pos; S.maps.B.plane.setLatLng([p.lat, p.lng||p.lon]); } else { updatePlanePosition('B', progressB/100); }
     }
 
-    // banner: show both ETAs + gap
-    if(REAL_TIME_RACING && S.racing){
-      const leadIsA = currentA < currentB;
-      const leadFlight = leadIsA ? 'A' : 'B';
-      const lagFlight  = leadIsA ? 'B' : 'A';
-      const leadETA = Math.min(currentA, currentB);
-      const lagETA  = Math.max(currentA, currentB);
-      const minRemainingLead = Math.max(0, leadETA - (elapsed/60000));
-      const minRemainingLag  = Math.max(0, lagETA - (elapsed/60000));
-      const gap = Math.max(0, minRemainingLag - minRemainingLead);
-      timerEl.textContent = `LIVE RACE - Flight ${leadFlight} leads - ETA ${fmtClock(minRemainingLead)} (${lagFlight} ${fmtClock(minRemainingLag)}, Δ${fmtClock(gap)})`;
+    // --- Banner (once per second, based on baseline; with hysteresis) ---
+    if (REAL_TIME_RACING && S.racing) {
+      const now = Date.now();
+      if (now - S._lastBannerUpdate >= 1000) {
+        const baseTime = S.etaBaselineTime || S.raceStartTime || now;
+        const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
+
+        const remA = Math.max(0, (S.etaBaseline.A ?? S.dealt.A.etaMinutes) - elapsedMinSinceBase);
+        const remB = Math.max(0, (S.etaBaseline.B ?? S.dealt.B.etaMinutes) - elapsedMinSinceBase);
+
+        const rawLeader = remA < remB ? 'A' : 'B';
+
+        // 2s hysteresis to avoid ping-pong
+        const HYSTERESIS_MS = 2000;
+        if (S._stableLeader == null) {
+          S._stableLeader = rawLeader;
+          S._leaderLockUntil = now + HYSTERESIS_MS;
+        } else if (rawLeader !== S._stableLeader) {
+          if (now >= S._leaderLockUntil) {
+            S._stableLeader = rawLeader;
+            S._leaderLockUntil = now + HYSTERESIS_MS;
+          }
+        }
+
+        const lead = S._stableLeader;
+        const lag  = lead === 'A' ? 'B' : 'A';
+        const leadRem = lead === 'A' ? remA : remB;
+        const lagRem  = lead === 'A' ? remB : remA;
+        const gap = Math.max(0, lagRem - leadRem);
+
+        timerEl.textContent = `LIVE RACE - Flight ${lead} leads - ETA ${fmtClock(leadRem)} (${lag} ${fmtClock(lagRem)}, Δ${fmtClock(gap)})`;
+
+        S._lastBannerUpdate = now;
+      }
     }
 
     if(progressA >= 100 || progressB >= 100){
@@ -437,7 +496,6 @@ async function liveFlights(iata){
 
 /* =================== HUD / Update =================== */
 function updateHUD(){
-  // Names next to bank (left = Cajun, right = Kessler)
   if(nameKEl) nameKEl.textContent = nameOf('K');
   if(nameCEl) nameCEl.textContent = nameOf('C');
 
@@ -450,7 +508,6 @@ function updateHUD(){
   betIn.value = S.bet;
   airportIn.value = S.airport;
 
-  // Win condition callouts (use mapped names)
   if(S.bank.K >= 5000 && S.bank.C <= -5000) setLog(`🎉 ${nameOf('K').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
   else if(S.bank.C >= 5000 && S.bank.K <= -5000) setLog(`🎉 ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
 }
@@ -494,7 +551,6 @@ async function deal(){
   if(seat!=="K" && seat!=="C"){ showBubble("K","Join a seat to play!"); return; }
 
   S.airport = (airportIn.value||"JFK").toUpperCase();
-  // Bet is a base stake; banks can go negative (game design)
   S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, 1e9);
   S.live = true;
 
@@ -540,6 +596,10 @@ async function deal(){
   S.pickedBy = {A:null, B:null};
   S.odds = null;
 
+  // clear Δ baselines (they’re set when the race actually starts)
+  S.etaBaseline = {A:null, B:null};
+  S.etaBaselineTime = null;
+
   renderDealt();
 
   if(S.turn === seat){ setLog("Your turn! Pick flight A or B. Your opponent gets the other one."); showBubble(S.turn, "My pick!"); }
@@ -578,6 +638,11 @@ async function start(choice){
   S.racing = true;
   S.raceStartTime = Date.now();
 
+  // Baseline ETAs for smooth countdown (prevents double-subtract)
+  S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
+  S.etaBaselineTime = S.raceStartTime;
+  S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
+
   S.pickedBy.A = choice === 'A' ? S.turn : (S.turn === "K" ? "C" : "K");
   S.pickedBy.B = choice === 'B' ? S.turn : (S.turn === "K" ? "C" : "K");
 
@@ -606,9 +671,15 @@ async function start(choice){
 }
 
 async function resolve(){
-  const {A,B} = S.dealt;
-  const tie = (A.etaMinutes===B.etaMinutes);
-  const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
+  // Determine winner by remaining time (using the baseline model)
+  const now = Date.now();
+  const baseTime = S.etaBaselineTime || S.raceStartTime || now;
+  const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
+  const remA = Math.max(0, (S.etaBaseline.A ?? S.dealt.A.etaMinutes) - elapsedMinSinceBase);
+  const remB = Math.max(0, (S.etaBaseline.B ?? S.dealt.B.etaMinutes) - elapsedMinSinceBase);
+
+  const tie = Math.abs(remA - remB) < 0.01; // ~0.6 sec
+  const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (remA < remB ? 'A' : 'B');
 
   const turnPlayer = S.turn;
   const oppPlayer  = S.turn === "K" ? "C" : "K";
@@ -686,7 +757,6 @@ copyBtn.addEventListener("click", copyInvite);
 
 /* =================== Init =================== */
 (async function init(){
-  // Set static name labels under the bank (left/right)
   if(nameKEl) nameKEl.textContent = nameOf('K');
   if(nameCEl) nameCEl.textContent = nameOf('C');
 
@@ -694,7 +764,6 @@ copyBtn.addEventListener("click", copyInvite);
   updateHUD();
   startBlinking();
 
-  // Load the sofa image (optional)
   const img = new Image();
   img.onload = function(){
     const stage = byId("stage");
