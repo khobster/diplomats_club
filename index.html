@@ -5,13 +5,13 @@
   <title>Diplomat's Lounge</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Inline favicon (avoids GH Pages 404s) -->
+  <!-- Inline favicon -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230058ff'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-family='Arial' font-size='16' fill='white'%3EDL%3C/text%3E%3C/svg%3E">
 
   <!-- Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800&display=swap" rel="stylesheet">
 
-  <!-- Leaflet (mini-maps) -->
+  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
 
@@ -19,7 +19,8 @@
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
     import { 
-      getFirestore, doc, setDoc, getDoc, updateDoc,
+      getFirestore, 
+      doc, setDoc, getDoc, updateDoc,
       onSnapshot, runTransaction, collection
     } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
 
@@ -52,9 +53,9 @@
       --ring:#e8edf4; --shadow:rgba(16,24,40,.08);
       --stage-max: 900px;
 
-      /* quick dials */
-      --stage-width: 420px;   /* shrink the couch area */
-      --map-height: 260px;    /* make maps more prominent */
+      /* compact layout dials */
+      --stage-width: 340px;  /* smaller couch card */
+      --map-height: 300px;   /* bigger maps */
     }
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -64,6 +65,7 @@
       display:flex; flex-direction:column; align-items:center;
     }
 
+    /* Header */
     header{
       width:100%; max-width:var(--stage-max);
       padding:10px 16px 2px;
@@ -77,7 +79,8 @@
     .btn:disabled{opacity:.55; cursor:not-allowed}
     .btn:hover:not(:disabled) { opacity: 0.9; }
 
-    main{ width:100%; max-width:var(--stage-max); padding:6px 16px 18px; display:flex; flex-direction:column; align-items:center; gap:10px }
+    /* Stage (smaller) */
+    main{ width:100%; max-width:var(--stage-max); padding:6px 16px 16px; display:flex; flex-direction:column; align-items:center; gap:8px }
     .stage{ width:min(100%, var(--stage-width)); position:relative; aspect-ratio: 16 / 11; border-radius:22px; overflow:hidden; background:#f0f0f0 }
     .stage img{ width:100%; height:100%; object-fit:cover; display:block; filter:saturate(1.02) }
     .stage-placeholder { 
@@ -87,13 +90,17 @@
 
     .faces{ position:absolute; inset:0; pointer-events:none }
 
-    .bubble{ position:absolute; padding:6px 10px; border-radius:10px; background:#111827; color:#fff;
+    /* Bubbles */
+    .bubble{
+      position:absolute; padding:6px 10px; border-radius:10px; background:#111827; color:#fff;
       font-size:12px; font-weight:700; opacity:0; transform:translate(-50%,-8px); transition:opacity .16s ease, transform .16s ease;
-      white-space:nowrap; pointer-events:none; z-index: 10; }
+      white-space:nowrap; pointer-events:none; z-index: 10;
+    }
     .bubble.show{ opacity:1; transform:translate(-50%,-14px) }
     #bubK{ left:24%; top:24% }
     #bubC{ left:78%; top:24% }
 
+    /* Controls (LIVE removed: always live) */
     .controls{
       display:flex; gap:8px; flex-wrap:wrap; justify-content:center;
       border:1px solid var(--ring); border-radius:999px; padding:6px 8px;
@@ -103,6 +110,7 @@
     .ctl input[type="text"], .ctl input[type="number"]{
       width:86px; padding:8px 10px; border-radius:999px; border:1px solid var(--ring); text-align:center; font-weight:800
     }
+
     .bankRow{ 
       display:flex; gap:12px; justify-content:center; align-items:center; 
       font-weight:800; flex-wrap: wrap; font-size: 18px; 
@@ -111,8 +119,9 @@
     .opp{ color:var(--bad) }
     .zero { color: var(--muted) }
 
-    .arena{ width:100%; display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top: 8px; }
-    .card{ border:1px solid var(--ring); background:#fff; border-radius:16px; padding:14px; box-shadow:0 8px 24px var(--shadow); cursor: pointer; transition: all 0.2s; position: relative;}
+    /* Cards + maps */
+    .arena{ width:100%; display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top: 8px; }
+    .card{ border:1px solid var(--ring); background:#fff; border-radius:16px; padding:12px; box-shadow:0 8px 24px var(--shadow); cursor: pointer; transition: all 0.2s; position: relative;}
     .card:hover { transform: translateY(-2px); box-shadow:0 12px 32px var(--shadow); }
     .card.picked-k { border: 3px solid var(--good); }
     .card.picked-c { border: 3px solid var(--bad); }
@@ -126,6 +135,7 @@
     .map{ margin-top:10px; height:var(--map-height); border-radius:12px; overflow:hidden; border:1px solid var(--ring) }
     .log{ text-align:center; font-weight:800; border:1px solid var(--ring); background:#fff; border-radius:14px; padding:12px; box-shadow:0 8px 24px var(--shadow); font-size: 16px; }
 
+    /* Error banner */
     .error-banner {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
       background: #fee2e2; color: #7f1d1d; padding: 12px 20px; border-radius: 12px;
@@ -135,7 +145,7 @@
     @media (max-width:860px){
       .arena{ grid-template-columns:1fr }
       header { justify-content: center; }
-      :root{ --map-height: 220px; --stage-width: 360px; }
+      :root{ --map-height: 240px; --stage-width: 300px; }
     }
 
     /* Face animation */
@@ -147,7 +157,7 @@
     .frown{ transform: scaleY(0.6) scaleX(1.1) }
   </style>
 </head>
-<body>
+<body class="compact">
   <header>
     <div class="brand">Diplomat's Lounge</div>
     <div class="pill" id="seatPill" title="Your seat">Seat: <strong id="seatName">Solo</strong></div>
@@ -158,18 +168,23 @@
   </header>
 
   <main>
+    <!-- Stage -->
     <div class="stage" id="stage">
       <div class="stage-placeholder"><span>Diplomat's Lounge</span></div>
 
+      <!-- Bubbles -->
       <div class="bubble" id="bubK"></div>
       <div class="bubble" id="bubC"></div>
 
+      <!-- Faces -->
       <svg class="faces" viewBox="0 0 1152 768" preserveAspectRatio="xMidYMid slice" style="display:none;">
+        <!-- Left person (seat K) -->
         <g id="K" transform="translate(408, 258)">
           <ellipse id="K_eyeL" class="eye" cx="-30" cy="0" rx="11" ry="11" fill="#1b2230"/>
           <ellipse id="K_eyeR" class="eye" cx="30"  cy="0" rx="11" ry="11" fill="#1b2230"/>
           <rect id="K_mouth" class="mouth" x="-22" y="38" width="44" height="14" rx="7" fill="#1b2230"/>
         </g>
+        <!-- Right person (seat C) -->
         <g id="C" transform="translate(777, 270)">
           <ellipse id="C_eyeL" class="eye" cx="-28" cy="0" rx="11" ry="11" fill="#1b2230"/>
           <ellipse id="C_eyeR" class="eye" cx="28"  cy="0" rx="11" ry="11" fill="#1b2230"/>
@@ -178,7 +193,7 @@
       </svg>
     </div>
 
-    <!-- Controls (LIVE removed: always live) -->
+    <!-- Controls -->
     <div class="controls">
       <div class="ctl"><input id="airport" type="text" maxlength="4" value="JFK" placeholder="IATA" /></div>
       <div class="ctl"><span>Bet</span><input id="betIn" type="number" value="50" step="25" min="25" /></div>
@@ -187,14 +202,15 @@
     </div>
 
     <div class="bankRow">
-      <span>Kessler: <span id="bankK" class="zero">$0</span></span>
+      <span><span id="nameK">Kessler</span>: <span id="bankK" class="zero">$0</span></span>
       <span>·</span>
-      <span>Cajun: <span id="bankC" class="zero">$0</span></span>
+      <span><span id="nameC">Cajun</span>: <span id="bankC" class="zero">$0</span></span>
       <span style="display:block; width:100%; font-size:14px; color:var(--muted); margin-top:6px;">
         First to +$5,000 (while opponent is -$5,000) wins!
       </span>
     </div>
 
+    <!-- Arena -->
     <div class="arena">
       <div class="card" id="A">
         <div class="line" id="lineA">A — waiting…</div>
