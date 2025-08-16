@@ -1,4 +1,4 @@
-/* Diplomat's Lounge — Always-live + icao24 tracking + Δ smoothing + fair longshot payouts */
+/* Diplomat's Lounge — Always-live + icao24 tracking + fractional ETAs + Δ smoothing + fair longshot payouts */
 
 /* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
@@ -16,7 +16,7 @@ function toast(t){ setLog(t); }
 const seatPill = byId("seatPill"), seatName = byId("seatName");
 const newRoomBtn = byId("newRoom"), copyBtn = byId("copyLink");
 
-/* Seat code → display name (left is K seat but the Cajun; right is C seat but Kessler) */
+/* Seat code → display name (left seat 'K' is Cajun; right seat 'C' is Kessler) */
 const N = { K: "Cajun", C: "Kessler" };
 const nameOf = (s) => N[s] || "Solo";
 function setSeatLabel(s){ seatName.textContent = nameOf(s); }
@@ -228,7 +228,11 @@ const S = {
   etaBaselineTime: null,
   _lastBannerUpdate: 0,
   _stableLeader: null,
-  _leaderLockUntil: 0
+  _leaderLockUntil: 0,
+
+  // live update timing
+  lastLiveUpdateAt: null,
+  nextLiveUpdateAt: null
 };
 
 /* =================== Utilities =================== */
@@ -243,16 +247,28 @@ const fmtClock = (minF)=>{
 /* =================== Live Flight Updates =================== */
 async function updateLivePositions() {
   if(!S.racing || !S.dealt || !S.live) return;
+
+  // If these are simulated flights (no icao24), skip live ping
+  const ida = S.dealt?.A?.icao24 || "";
+  const idb = S.dealt?.B?.icao24 || "";
+  if (!ida && !idb) return;
+
   try{
     // Request updates for THESE exact two flights by icao24
-    const ida = S.dealt?.A?.icao24 || "";
-    const idb = S.dealt?.B?.icao24 || "";
     const track = [ida, idb].filter(Boolean).join(",");
     const url = `${LIVE_PROXY}?airport=${encodeURIComponent(S.airport)}${track ? `&track=${encodeURIComponent(track)}` : ""}`;
 
     const r = await fetch(url, {cache:"no-store"});
     if(!r.ok) throw new Error("Live update failed");
     const data = await r.json();
+
+    // capture server timestamp for "next update in"
+    if (typeof data.updatedAt === "number") {
+      S.lastLiveUpdateAt = data.updatedAt;
+    } else {
+      S.lastLiveUpdateAt = Date.now();
+    }
+    S.nextLiveUpdateAt = S.lastLiveUpdateAt + LIVE_UPDATE_INTERVAL;
 
     const flightA = S.dealt.A;
     const flightB = S.dealt.B;
@@ -277,19 +293,19 @@ async function updateLivePositions() {
     let updated=false;
     if(updatedA?.pos){
       S.dealt.A.pos = updatedA.pos;
-      if (Number.isFinite(updatedA.etaMinutes)) S.dealt.A.etaMinutes = updatedA.etaMinutes;
+      if (Number.isFinite(updatedA.etaMinutes)) S.dealt.A.etaMinutes = updatedA.etaMinutes; // fractional
       updated = true;
-      showBubble("K", `Flight A: ${S.dealt.A.etaMinutes} min!`, 2000);
+      showBubble("K", `Flight A: ${Math.round(S.dealt.A.etaMinutes)} min!`, 2000);
     }
     if(updatedB?.pos){
       S.dealt.B.pos = updatedB.pos;
-      if (Number.isFinite(updatedB.etaMinutes)) S.dealt.B.etaMinutes = updatedB.etaMinutes;
+      if (Number.isFinite(updatedB.etaMinutes)) S.dealt.B.etaMinutes = updatedB.etaMinutes; // fractional
       updated = true;
-      showBubble("C", `Flight B: ${S.dealt.B.etaMinutes} min!`, 2000);
+      showBubble("C", `Flight B: ${Math.round(S.dealt.B.etaMinutes)} min!`, 2000);
     }
 
     if(updated){
-      // Reset countdown baseline to newest ETAs
+      // Reset countdown baseline to newest ETAs (keep fractional)
       S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
       S.etaBaselineTime = Date.now();
 
@@ -317,15 +333,16 @@ function startRaceAnimation(){
   S.raceDuration = raceMs;
 
   if (!S.etaBaselineTime) {
-    S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
+    S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes }; // fractional
     S.etaBaselineTime = S.raceStartTime;
     S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
   }
 
   let updateInterval=null;
   if(REAL_TIME_RACING && S.live){
-    setTimeout(()=>updateLivePositions(), 60000);
-    updateInterval = setInterval(()=>updateLivePositions(), LIVE_UPDATE_INTERVAL);
+    setTimeout(()=>updateLivePositions(), 60000);                     // first ping after 60s
+    updateInterval = setInterval(()=>updateLivePositions(), LIVE_UPDATE_INTERVAL); // then every 3 min
+    S.nextLiveUpdateAt = (S.lastLiveUpdateAt || S.raceStartTime) + 60000;
   }
 
   const timerEl = byId("log");
@@ -347,7 +364,7 @@ function startRaceAnimation(){
       if(S.dealt.B.pos){ const p=S.dealt.B.pos; S.maps.B.plane.setLatLng([p.lat, p.lng||p.lon]); } else { updatePlanePosition('B', progressB/100); }
     }
 
-    // Banner (1 Hz; baseline; hysteresis)
+    // Banner (1 Hz; baseline; hysteresis) with "next update in"
     if (REAL_TIME_RACING && S.racing) {
       const now = Date.now();
       if (now - S._lastBannerUpdate >= 1000) {
@@ -376,7 +393,14 @@ function startRaceAnimation(){
         const lagRem  = lead === 'A' ? remB : remA;
         const gap = Math.max(0, lagRem - leadRem);
 
-        timerEl.textContent = `LIVE RACE - Flight ${lead} leads - ETA ${fmtClock(leadRem)} (${lag} ${fmtClock(lagRem)}, Δ${fmtClock(gap)})`;
+        const nextAt = S.nextLiveUpdateAt || (S.raceStartTime + 60000); // first update at +60s
+        const msToNext = Math.max(0, nextAt - now);
+        const secToNext = Math.ceil(msToNext/1000);
+        const mm = Math.floor(secToNext/60), ss = (secToNext%60).toString().padStart(2,'0');
+
+        timerEl.textContent =
+          `LIVE RACE - Flight ${lead} leads - ETA ${fmtClock(leadRem)} ` +
+          `(${lag} ${fmtClock(lagRem)}, Δ${fmtClock(gap)}) · next update in ${mm}:${ss}`;
 
         S._lastBannerUpdate = now;
       }
@@ -482,7 +506,9 @@ function simFlights(iata){
   const r=(a,b)=>Math.floor(Math.random()*(b-a+1))+a;
   const p=()=>{ 
     const origin=cities[r(0,cities.length-1)];
-    return { icao24:"", origin, dest:iata, etaMinutes:r(3,14), callsign:`${iata}${r(100,999)}` };
+    // add a small fractional part so seconds differ in sim mode too
+    const eta = r(3,14) + Math.random();
+    return { icao24:"", origin, dest:iata, etaMinutes:eta, callsign:`${iata}${r(100,999)}` };
   };
   let A=p(),B=p();
   if(B.origin===A.origin) B.origin=cities[(cities.indexOf(A.origin)+3)%cities.length];
@@ -521,8 +547,9 @@ function renderDealt(){
   const originB = B.origin !== "—" ? B.origin : "???";
   lineA.textContent = `A — ${originA} → ${A.dest} (${A.callsign})`;
   lineB.textContent = `B — ${originB} → ${B.dest} (${B.callsign})`;
-  etaA.textContent = `ETA ~ ${A.etaMinutes} min`;
-  etaB.textContent = `ETA ~ ${B.etaMinutes} min`;
+  // round on cards for cleanliness; keep fractional internally for banner
+  etaA.textContent = `ETA ~ ${Math.round(A.etaMinutes)} min`;
+  etaB.textContent = `ETA ~ ${Math.round(B.etaMinutes)} min`;
 
   const cardA = byId("A"), cardB = byId("B");
   cardA.querySelectorAll('.picker-badge').forEach(b => b.remove());
@@ -577,16 +604,16 @@ async function deal(){
       const minETA = Math.min(data.A.etaMinutes, data.B.etaMinutes);
       if(minETA < 10){
         data = simFlights(S.airport);
-        data.A.etaMinutes = 15 + Math.floor(Math.random()*30);
-        data.B.etaMinutes = 20 + Math.floor(Math.random()*35);
+        data.A.etaMinutes = 15 + Math.random()*30;
+        data.B.etaMinutes = 20 + Math.random()*35;
         setLog("Live flights too close—using simulated flights for a longer race.");
       }
     }
   }catch(e){
     console.warn("[DL] Flight fetch error:", e);
     data = simFlights(S.airport);
-    data.A.etaMinutes = 15 + Math.floor(Math.random()*30);
-    data.B.etaMinutes = 20 + Math.floor(Math.random()*35);
+    data.A.etaMinutes = 15 + Math.random()*30;
+    data.B.etaMinutes = 20 + Math.random()*35;
     setLog("Live unavailable—using simulated flights.");
   }
 
@@ -638,7 +665,7 @@ async function start(choice){
   S.racing = true;
   S.raceStartTime = Date.now();
 
-  // Baseline ETAs
+  // Baseline ETAs (fractional)
   S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
   S.etaBaselineTime = S.raceStartTime;
   S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
