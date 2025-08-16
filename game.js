@@ -1,4 +1,6 @@
-/* Diplomat's Lounge — Always-live + icao24 tracking + fractional ETAs + Δ smoothing + fair longshot payouts */
+/* Diplomat's Lounge — Always-live + icao24 tracking + fractional ETAs + fair longshot payouts
+   + live card ETAs that match the banner (with “Landed” on winner)
+*/
 
 /* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
@@ -54,6 +56,12 @@ async function initFirebase(){
 function disableRooms(reason){ newRoomBtn.disabled = true; copyBtn.disabled = true; console.warn("[DL] Rooms disabled:", reason); }
 
 /* -------- Rooms -------- */
+function randomCode(n=6){ 
+  const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
+  return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); 
+}
+function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
+
 async function ensureRoom(){
   if(!db){ const ok = await initFirebase(); if(!ok) return null; }
 
@@ -183,7 +191,6 @@ const mapA = byId("mapA"), mapB = byId("mapB");
 const dealBtn = byId("deal"), resetBtn = byId("reset");
 const airportIn = byId("airport"), betIn = byId("betIn");
 const bankK = byId("bankK"), bankC = byId("bankC");
-const nameKEl = byId("nameK"), nameCEl = byId("nameC");
 const bubK = byId("bubK"), bubC = byId("bubC");
 
 /* Face nodes */
@@ -223,7 +230,7 @@ const S = {
   pickedBy: {A:null, B:null},
   odds: null,
 
-  // Δ smoothing
+  // Δ baseline
   etaBaseline: { A: null, B: null },
   etaBaselineTime: null,
   _lastBannerUpdate: 0,
@@ -364,7 +371,7 @@ function startRaceAnimation(){
       if(S.dealt.B.pos){ const p=S.dealt.B.pos; S.maps.B.plane.setLatLng([p.lat, p.lng||p.lon]); } else { updatePlanePosition('B', progressB/100); }
     }
 
-    // Banner (1 Hz; baseline; hysteresis) with "next update in"
+    // Banner + card ETA sync (1 Hz)
     if (REAL_TIME_RACING && S.racing) {
       const now = Date.now();
       if (now - S._lastBannerUpdate >= 1000) {
@@ -374,8 +381,14 @@ function startRaceAnimation(){
         const remA = Math.max(0, (S.etaBaseline.A ?? S.dealt.A.etaMinutes) - elapsedMinSinceBase);
         const remB = Math.max(0, (S.etaBaseline.B ?? S.dealt.B.etaMinutes) - elapsedMinSinceBase);
 
-        const rawLeader = remA < remB ? 'A' : 'B';
+        // --- keep card ETAs in sync with the live baseline ---
+        const kmA = etaA.dataset.km ? ` — ~${etaA.dataset.km} km` : "";
+        const kmB = etaB.dataset.km ? ` — ~${etaB.dataset.km} km` : "";
+        etaA.textContent = remA <= 0 ? `Landed${kmA}` : `ETA ${fmtClock(remA)}${kmA}`;
+        etaB.textContent = remB <= 0 ? `Landed${kmB}` : `ETA ${fmtClock(remB)}${kmB}`;
+        // ------------------------------------------------------
 
+        const rawLeader = remA < remB ? 'A' : 'B';
         const HYSTERESIS_MS = 2000;
         if (S._stableLeader == null) {
           S._stableLeader = rawLeader;
@@ -525,9 +538,6 @@ async function liveFlights(iata){
 
 /* =================== HUD / Update =================== */
 function updateHUD(){
-  if(nameKEl) nameKEl.textContent = nameOf('K');
-  if(nameCEl) nameCEl.textContent = nameOf('C');
-
   const kEl = bankK, cEl = bankC;
   kEl.textContent = fmtMoney(S.bank.K);
   cEl.textContent = fmtMoney(S.bank.C);
@@ -547,7 +557,7 @@ function renderDealt(){
   const originB = B.origin !== "—" ? B.origin : "???";
   lineA.textContent = `A — ${originA} → ${A.dest} (${A.callsign})`;
   lineB.textContent = `B — ${originB} → ${B.dest} (${B.callsign})`;
-  // round on cards for cleanliness; keep fractional internally for banner
+  // round on cards for cleanliness pre-race; (race loop will switch to live MM:SS)
   etaA.textContent = `ETA ~ ${Math.round(A.etaMinutes)} min`;
   etaB.textContent = `ETA ~ ${Math.round(B.etaMinutes)} min`;
 
@@ -571,8 +581,17 @@ function renderDealt(){
     cardB.appendChild(badge);
   }
 
-  try{ const da = fitAndRender('A', A, S.destPos); etaA.textContent += ` — ~${da} km`; }catch(e){ console.warn("[DL] Map A render error:", e); }
-  try{ const db = fitAndRender('B', B, S.destPos); etaB.textContent += ` — ~${db} km`; }catch(e){ console.warn("[DL] Map B render error:", e); }
+  // cache distance once so we can append it while updating ETA live
+  try{ 
+    const da = fitAndRender('A', A, S.destPos); 
+    etaA.dataset.km = da; 
+    etaA.textContent += ` — ~${da} km`; 
+  }catch(e){ console.warn("[DL] Map A render error:", e); }
+  try{ 
+    const db = fitAndRender('B', B, S.destPos); 
+    etaB.dataset.km = db; 
+    etaB.textContent += ` — ~${db} km`; 
+  }catch(e){ console.warn("[DL] Map B render error:", e); }
 }
 
 /* =================== Round flow =================== */
@@ -722,6 +741,12 @@ async function resolve(){
   S.bank[winnerPlayer] += payout;
   S.bank[loserPlayer]  -= payout;
 
+  // set Landed on winning card for clarity
+  const kmA = etaA.dataset.km ? ` — ~${etaA.dataset.km} km` : "";
+  const kmB = etaB.dataset.km ? ` — ~${etaB.dataset.km} km` : "";
+  if (winner === 'A') etaA.textContent = `Landed${kmA}`;
+  else etaB.textContent = `Landed${kmB}`;
+
   const winnerName = nameOf(winnerPlayer);
   const loserName  = nameOf(loserPlayer);
   const bonusText  = winner === long ? ` (longshot ${mult.toFixed(2)}×)` : "";
@@ -781,16 +806,7 @@ newRoomBtn.addEventListener("click", createRoom);
 copyBtn.addEventListener("click", copyInvite);
 
 /* =================== Init =================== */
-function randomCode(n=6){ 
-  const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
-  return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); 
-}
-function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
-
 (async function init(){
-  if(nameKEl) nameKEl.textContent = nameOf('K');
-  if(nameCEl) nameCEl.textContent = nameOf('C');
-
   setSeatLabel(seat);
   updateHUD();
   startBlinking();
