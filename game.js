@@ -1,7 +1,4 @@
-async function resolve(){
-  const {A,B}=S.dealt;
-  const tie = (A.etaMinutes===B.etaMinutes);
-  const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (A.etaMinutes/* Diplomat's Lounge — Fixed version with proper Firebase integration */
+/* Diplomat's Lounge — Fixed version with proper Firebase integration */
 
 /* ========= Lambda Gateway URL ========= */
 const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/flights";
