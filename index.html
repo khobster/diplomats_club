@@ -19,17 +19,10 @@
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
     import { 
-      getFirestore, 
-      doc, 
-      setDoc, 
-      getDoc, 
-      updateDoc,
-      onSnapshot,
-      runTransaction,
-      collection
+      getFirestore, doc, setDoc, getDoc, updateDoc,
+      onSnapshot, runTransaction, collection
     } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
 
-    // Your Firebase config
     const firebaseConfig = {
       apiKey: "AIzaSyDeL3u1VfeXIE6-_XNvT9EHmcmorVb-Pvk",
       authDomain: "diplomats-lounge.firebaseapp.com",
@@ -39,11 +32,9 @@
       appId: "1:358973240719:web:fa24ea1f6234af10f987fa"
     };
 
-    // Initialize Firebase
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    // Make Firebase functions available globally
     window.firebaseDb = db;
     window.firebaseDoc = doc;
     window.firebaseSetDoc = setDoc;
@@ -60,6 +51,10 @@
       --blue:#055aff; --good:#079455; --bad:#e11d48;
       --ring:#e8edf4; --shadow:rgba(16,24,40,.08);
       --stage-max: 900px;
+
+      /* quick dials */
+      --stage-width: 420px;   /* shrink the couch area */
+      --map-height: 260px;    /* make maps more prominent */
     }
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -69,10 +64,9 @@
       display:flex; flex-direction:column; align-items:center;
     }
 
-    /* Header */
     header{
       width:100%; max-width:var(--stage-max);
-      padding:12px 16px 4px;
+      padding:10px 16px 2px;
       display:flex; gap:12px; align-items:center; justify-content:space-between;
       flex-wrap: wrap;
     }
@@ -83,36 +77,23 @@
     .btn:disabled{opacity:.55; cursor:not-allowed}
     .btn:hover:not(:disabled) { opacity: 0.9; }
 
-    /* Stage - smaller */
-    main{ width:100%; max-width:var(--stage-max); padding:8px 16px 24px; display:flex; flex-direction:column; align-items:center; gap:12px }
-    .stage{ width:min(100%, 500px); position:relative; aspect-ratio: 3 / 2; border-radius:22px; overflow:hidden; background: #f0f0f0; }
+    main{ width:100%; max-width:var(--stage-max); padding:6px 16px 18px; display:flex; flex-direction:column; align-items:center; gap:10px }
+    .stage{ width:min(100%, var(--stage-width)); position:relative; aspect-ratio: 16 / 11; border-radius:22px; overflow:hidden; background:#f0f0f0 }
     .stage img{ width:100%; height:100%; object-fit:cover; display:block; filter:saturate(1.02) }
     .stage-placeholder { 
-      width:100%; 
-      height:100%; 
-      display:flex; 
-      align-items:center; 
-      justify-content:center; 
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      font-size: 24px;
-      font-weight: 800;
+      width:100%; height:100%; display:flex; align-items:center; justify-content:center; 
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:white; font-size: 24px; font-weight: 800;
     }
 
-    /* Face overlay (scales with image) */
     .faces{ position:absolute; inset:0; pointer-events:none }
 
-    /* Bubbles */
-    .bubble{
-      position:absolute; padding:6px 10px; border-radius:10px; background:#111827; color:#fff;
+    .bubble{ position:absolute; padding:6px 10px; border-radius:10px; background:#111827; color:#fff;
       font-size:12px; font-weight:700; opacity:0; transform:translate(-50%,-8px); transition:opacity .16s ease, transform .16s ease;
-      white-space:nowrap; pointer-events:none; z-index: 10;
-    }
+      white-space:nowrap; pointer-events:none; z-index: 10; }
     .bubble.show{ opacity:1; transform:translate(-50%,-14px) }
     #bubK{ left:24%; top:24% }
     #bubC{ left:78%; top:24% }
 
-    /* Controls */
     .controls{
       display:flex; gap:8px; flex-wrap:wrap; justify-content:center;
       border:1px solid var(--ring); border-radius:999px; padding:6px 8px;
@@ -130,56 +111,31 @@
     .opp{ color:var(--bad) }
     .zero { color: var(--muted) }
 
-    /* Cards + maps - BIGGER */
-    .arena{ width:100%; display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top: 20px; }
-    .card{ 
-      border:1px solid var(--ring); background:#fff; border-radius:16px; 
-      padding:16px; box-shadow:0 8px 24px var(--shadow); cursor: pointer; 
-      transition: all 0.2s; position: relative;
-    }
+    .arena{ width:100%; display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top: 8px; }
+    .card{ border:1px solid var(--ring); background:#fff; border-radius:16px; padding:14px; box-shadow:0 8px 24px var(--shadow); cursor: pointer; transition: all 0.2s; position: relative;}
     .card:hover { transform: translateY(-2px); box-shadow:0 12px 32px var(--shadow); }
     .card.picked-k { border: 3px solid var(--good); }
     .card.picked-c { border: 3px solid var(--bad); }
-    .picker-badge {
-      position: absolute; top: -10px; right: 16px;
-      padding: 4px 12px; border-radius: 999px;
-      font-size: 12px; font-weight: 800;
-      color: white;
-    }
+    .picker-badge { position: absolute; top: -10px; right: 16px; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 800; color: white; }
     .picker-badge.k { background: var(--good); }
     .picker-badge.c { background: var(--bad); }
     .line{ font-weight:800; letter-spacing:.04em; font-size: 16px; }
     .eta{ color:var(--muted); font-weight:700; font-size:14px; margin-top: 4px; }
-    .progress{ margin-top:10px; height:12px; background:#f3f6fb; border:1px solid var(--ring); border-radius:999px; overflow:hidden }
+    .progress{ margin-top:8px; height:10px; background:#f3f6fb; border:1px solid var(--ring); border-radius:999px; overflow:hidden }
     .bar{ height:100%; width:0%; background:linear-gradient(90deg,#19a0ff,#a8eaff); transition: width 0.1s ease; }
-    .map{ margin-top:12px; height:250px; border-radius:12px; overflow:hidden; border:1px solid var(--ring) }
-    .log{ 
-      text-align:center; font-weight:800; border:1px solid var(--ring); 
-      background:#fff; border-radius:14px; padding:16px; 
-      box-shadow:0 8px 24px var(--shadow); font-size: 16px;
-    }
+    .map{ margin-top:10px; height:var(--map-height); border-radius:12px; overflow:hidden; border:1px solid var(--ring) }
+    .log{ text-align:center; font-weight:800; border:1px solid var(--ring); background:#fff; border-radius:14px; padding:12px; box-shadow:0 8px 24px var(--shadow); font-size: 16px; }
 
-    /* Error banner */
     .error-banner {
-      position: fixed;
-      bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #fee2e2;
-      color: #7f1d1d;
-      padding: 12px 20px;
-      border-radius: 12px;
-      box-shadow: 0 8px 30px rgba(0,0,0,.12);
-      z-index: 9999;
-      font-size: 14px;
-      max-width: 90%;
-      text-align: center;
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: #fee2e2; color: #7f1d1d; padding: 12px 20px; border-radius: 12px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.12); z-index: 9999; font-size: 14px; max-width: 90%; text-align: center;
     }
 
     @media (max-width:860px){
       .arena{ grid-template-columns:1fr }
       header { justify-content: center; }
-      .map { height: 200px; }
+      :root{ --map-height: 220px; --stage-width: 360px; }
     }
 
     /* Face animation */
@@ -202,26 +158,18 @@
   </header>
 
   <main>
-    <!-- Centerpiece stage -->
     <div class="stage" id="stage">
-      <div class="stage-placeholder">
-        <span>Diplomat's Lounge</span>
-      </div>
-      
-      <!-- Speech bubbles -->
+      <div class="stage-placeholder"><span>Diplomat's Lounge</span></div>
+
       <div class="bubble" id="bubK"></div>
       <div class="bubble" id="bubC"></div>
 
-      <!-- Overlay SVG aligned to the PNG (viewBox from your asset) -->
       <svg class="faces" viewBox="0 0 1152 768" preserveAspectRatio="xMidYMid slice" style="display:none;">
-        <!-- Kessler -->
         <g id="K" transform="translate(408, 258)">
           <ellipse id="K_eyeL" class="eye" cx="-30" cy="0" rx="11" ry="11" fill="#1b2230"/>
           <ellipse id="K_eyeR" class="eye" cx="30"  cy="0" rx="11" ry="11" fill="#1b2230"/>
           <rect id="K_mouth" class="mouth" x="-22" y="38" width="44" height="14" rx="7" fill="#1b2230"/>
         </g>
-
-        <!-- Cajun -->
         <g id="C" transform="translate(777, 270)">
           <ellipse id="C_eyeL" class="eye" cx="-28" cy="0" rx="11" ry="11" fill="#1b2230"/>
           <ellipse id="C_eyeR" class="eye" cx="28"  cy="0" rx="11" ry="11" fill="#1b2230"/>
@@ -230,12 +178,9 @@
       </svg>
     </div>
 
-    <!-- Controls -->
+    <!-- Controls (LIVE removed: always live) -->
     <div class="controls">
-      <div class="ctl">
-        <label style="display:flex;align-items:center;gap:6px"><input id="liveToggle" type="checkbox"> LIVE</label>
-        <input id="airport" type="text" maxlength="4" value="JFK" placeholder="IATA" />
-      </div>
+      <div class="ctl"><input id="airport" type="text" maxlength="4" value="JFK" placeholder="IATA" /></div>
       <div class="ctl"><span>Bet</span><input id="betIn" type="number" value="50" step="25" min="25" /></div>
       <div class="ctl"><button id="deal" class="btn primary">Deal flights</button></div>
       <div class="ctl"><button id="reset" class="btn">Reset bank</button></div>
@@ -245,12 +190,11 @@
       <span>Kessler: <span id="bankK" class="zero">$0</span></span>
       <span>·</span>
       <span>Cajun: <span id="bankC" class="zero">$0</span></span>
-      <span style="display:block; width:100%; font-size:14px; color:var(--muted); margin-top:8px;">
+      <span style="display:block; width:100%; font-size:14px; color:var(--muted); margin-top:6px;">
         First to +$5,000 (while opponent is -$5,000) wins!
       </span>
     </div>
 
-    <!-- Arena -->
     <div class="arena">
       <div class="card" id="A">
         <div class="line" id="lineA">A — waiting…</div>
