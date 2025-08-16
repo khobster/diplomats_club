@@ -1,6 +1,7 @@
 /* Diplomat's Lounge — Always-live + icao24 tracking + fractional ETAs + fair longshot payouts
    + live card ETAs that match the banner (with "Landed" on winner)
    + distance shown in miles (mi) instead of km
+   + single race loop & single live interval; progress based on start ETA (no rubber-band)
 */
 
 /* ========= Lambda Gateway URL ========= */
@@ -105,12 +106,13 @@ async function ensureRoom(){
     seat = claim; setSeatLabel(seat); seatPill.title = `Room: ${roomId}`;
   }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
 
-  // Live listener
+  // Live listener (do NOT restart race loop on every doc change)
   if (unsubRoom) unsubRoom();
   unsubRoom = window.firebaseOnSnapshot(roomRef, (doc)=>{
     const D = doc.data(); if(!D) return;
 
-    const wasRacing = S.racing, oldChosen = S.chosen;
+    const wasRacing = S.racing;
+    const oldChosen = S.chosen;
 
     // Merge
     S.bank = {...D.bank};
@@ -124,31 +126,20 @@ async function ensureRoom(){
     S.chosen = D.chosen;
     S.roundSeed = D.roundSeed;
     S.lastWinner = D.lastWinner;
-    S.raceStartTime = D.raceStartTime || null;
+    S.raceStartTime = D.raceStartTime || S.raceStartTime || null;
     S.pickedBy = D.pickedBy || {A:null, B:null};
     S.odds = D.odds || null;
 
     updateHUD();
     if(S.dealt) renderDealt();
 
-    if(S.racing && (!wasRacing || S.chosen !== oldChosen)){
-      if (!S.etaBaselineTime) {
-        S.etaBaseline = { A: S.dealt?.A?.etaMinutes ?? 0, B: S.dealt?.B?.etaMinutes ?? 0 };
-        S.etaBaselineTime = S.raceStartTime || Date.now();
-        S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
-      }
-      const turnPlayer = nameOf(S.turn);
-      const oppPlayer  = nameOf(S.turn === "K" ? "C" : "K");
-      const oppChoice = S.chosen === 'A' ? 'B' : 'A';
-      setLog(`${turnPlayer} picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${S.odds && S.odds[S.odds.long] ? ` (longshot pays ${S.odds.mult.toFixed(2)}×)` : ""}!`);
+    // Start the race loop ONLY when race becomes true or when we don't have a loop yet.
+    const startedNow = (!wasRacing && S.racing) || (S.racing && !S._raceLoopActive);
+    const choiceChanged = (S.racing && S.chosen !== oldChosen);
+    if (startedNow || choiceChanged){
       startRaceAnimation();
-    }else if(S.racing){
-      if(S.raceStartTime) startRaceAnimation();
-    }else if(S.dealt && !S.racing){
-      if(S.turn === seat) setLog("Your turn! Pick flight A or B. Your opponent gets the other one.");
-      else setLog(`Waiting for ${nameOf(S.turn)} to pick a flight...`);
-    }else{
-      setLog("Deal flights to start.");
+    } else if (!S.racing){
+      stopRaceLoops(); // ensure timers cleared if race ended elsewhere
     }
   }, (err)=>{ console.error("[DL] room snapshot error:", err); showError("Lost connection. Reload the page."); });
 
@@ -234,13 +225,22 @@ const S = {
   // Δ baseline
   etaBaseline: { A: null, B: null },
   etaBaselineTime: null,
+
+  // For progress stability
+  startEta: { A:null, B:null },       // freezes at race start
   _lastBannerUpdate: 0,
   _stableLeader: null,
   _leaderLockUntil: 0,
 
   // live update timing
   lastLiveUpdateAt: null,
-  nextLiveUpdateAt: null
+  nextLiveUpdateAt: null,
+
+  // loop guards
+  _raceLoopActive: false,
+  _liveIntervalId: null,
+  _rafId: null,
+  _resolved: false
 };
 
 /* =================== Utilities =================== */
@@ -269,17 +269,14 @@ async function updateLivePositions() {
   }
 
   try {
-    // Build the tracking URL correctly
     const trackList = [ida, idb].filter(Boolean);
     const url = `${LIVE_PROXY}?airport=${encodeURIComponent(S.airport)}&track=${encodeURIComponent(trackList.join(','))}`;
-    
     console.log("[DL] Fetching live updates for:", trackList.join(','));
 
     const r = await fetch(url, {cache:"no-store"});
     if(!r.ok) throw new Error(`Live update failed: ${r.status}`);
     const data = await r.json();
 
-    // Update timestamp from server if provided
     if (typeof data.updatedAt === "number") {
       S.lastLiveUpdateAt = data.updatedAt;
       S.nextLiveUpdateAt = S.lastLiveUpdateAt + LIVE_UPDATE_INTERVAL;
@@ -291,14 +288,8 @@ async function updateLivePositions() {
     let updatedA = null, updatedB = null;
 
     if (Array.isArray(data.tracked)) {
-      // Match by icao24 (primary)
-      updatedA = data.tracked.find(f => 
-        (flightA.icao24 && f.icao24 && f.icao24.toLowerCase() === flightA.icao24.toLowerCase())
-      );
-      updatedB = data.tracked.find(f => 
-        (flightB.icao24 && f.icao24 && f.icao24.toLowerCase() === flightB.icao24.toLowerCase())
-      );
-      
+      updatedA = data.tracked.find(f => flightA.icao24 && f.icao24 && f.icao24.toLowerCase() === flightA.icao24.toLowerCase());
+      updatedB = data.tracked.find(f => flightB.icao24 && f.icao24 && f.icao24.toLowerCase() === flightB.icao24.toLowerCase());
       console.log("[DL] Tracked results:", {
         foundA: !!updatedA,
         foundB: !!updatedB,
@@ -317,7 +308,6 @@ async function updateLivePositions() {
       updated = true;
       showBubble("K", `Flight A: ${Math.round(S.dealt.A.etaMinutes)} min!`, 2000);
     }
-    
     if(updatedB && updatedB.pos) {
       S.dealt.B.pos = updatedB.pos;
       if (Number.isFinite(updatedB.etaMinutes)) {
@@ -330,7 +320,8 @@ async function updateLivePositions() {
     }
 
     if(updated) {
-      // Reset countdown baseline to newest ETAs
+      // Reset countdown baseline to newest ETAs (for the banner),
+      // but DO NOT change startEta — that keeps progress stable.
       S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
       S.etaBaselineTime = Date.now();
 
@@ -349,49 +340,62 @@ async function updateLivePositions() {
 }
 
 /* =================== Race Animation with Live Updates =================== */
+function stopRaceLoops(){
+  if (S._liveIntervalId){ clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
+  if (S._rafId){ cancelAnimationFrame(S._rafId); S._rafId = null; }
+  S._raceLoopActive = false;
+}
+
 function startRaceAnimation(){
   if(!S.dealt || !S.racing) return;
+  if (S._raceLoopActive) return; // prevent stacking
+  S._raceLoopActive = true;
+  S._resolved = false;
 
   const {A,B} = S.dealt;
-  let raceMs;
 
   if(REAL_TIME_RACING){
-    raceMs = Math.min(A.etaMinutes, B.etaMinutes) * 60 * 1000;
     setLog(`LIVE RACE! Updates every 3 min. First to land wins!`);
   }else{
-    raceMs = 6500;
+    setLog(`Sim race!`);
   }
 
   if (!S.raceStartTime) S.raceStartTime = Date.now();
-  S.raceDuration = raceMs;
 
+  // Initialize baselines (for banner) & freeze start ETA for progress stability
   if (!S.etaBaselineTime) {
-    S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes }; // fractional
+    S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
     S.etaBaselineTime = S.raceStartTime;
-    S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
   }
+  if (!S.startEta.A || !S.startEta.B){
+    S.startEta = { A: Math.max(0.1, S.dealt.A.etaMinutes), B: Math.max(0.1, S.dealt.B.etaMinutes) };
+  }
+  S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
 
-  let updateInterval=null;
-  if(REAL_TIME_RACING && S.live){
+  // Single live-update cadence
+  if(REAL_TIME_RACING && S.live && !S._liveIntervalId){
     setTimeout(()=>updateLivePositions(), 60000);                     // first ping after 60s
-    updateInterval = setInterval(()=>updateLivePositions(), LIVE_UPDATE_INTERVAL); // then every 3 min
+    S._liveIntervalId = setInterval(()=>updateLivePositions(), LIVE_UPDATE_INTERVAL); // then every 3 min
     S.nextLiveUpdateAt = (S.lastLiveUpdateAt || S.raceStartTime) + 60000;
   }
 
-  const timerEl = byId("log");
+  const loop = ()=>{
+    if(!S.racing){ stopRaceLoops(); return; }
 
-  (function step(){
-    if(!S.racing){ if(updateInterval) clearInterval(updateInterval); return; }
+    const now = Date.now();
+    const baseTime = S.etaBaselineTime || S.raceStartTime || now;
+    const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
 
-    const elapsed = Date.now() - S.raceStartTime;
-    const currentA = S.dealt.A.etaMinutes;
-    const currentB = S.dealt.B.etaMinutes;
+    const remA = Math.max(0, (S.etaBaseline.A ?? S.dealt.A.etaMinutes) - elapsedMinSinceBase);
+    const remB = Math.max(0, (S.etaBaseline.B ?? S.dealt.B.etaMinutes) - elapsedMinSinceBase);
 
-    const progressA = Math.min(100, (elapsed / (currentA * 60 * 1000)) * 100);
-    const progressB = Math.min(100, (elapsed / (currentB * 60 * 1000)) * 100);
+    // Progress driven by startEta (frozen at race start)
+    const progressA = clamp(100 * (1 - remA / S.startEta.A), 0, 100);
+    const progressB = clamp(100 * (1 - remB / S.startEta.B), 0, 100);
     barA.style.width = progressA.toFixed(1)+"%";
     barB.style.width = progressB.toFixed(1)+"%";
 
+    // Plane positions (use real pos if present, else interpolate)
     if(S.maps.A && S.maps.B){
       if(S.dealt.A.pos){ const p=S.dealt.A.pos; S.maps.A.plane.setLatLng([p.lat, p.lng||p.lon]); } else { updatePlanePosition('A', progressA/100); }
       if(S.dealt.B.pos){ const p=S.dealt.B.pos; S.maps.B.plane.setLatLng([p.lat, p.lng||p.lon]); } else { updatePlanePosition('B', progressB/100); }
@@ -399,31 +403,20 @@ function startRaceAnimation(){
 
     // Banner + card ETA sync (1 Hz)
     if (REAL_TIME_RACING && S.racing) {
-      const now = Date.now();
       if (now - S._lastBannerUpdate >= 1000) {
-        const baseTime = S.etaBaselineTime || S.raceStartTime || now;
-        const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
-
-        const remA = Math.max(0, (S.etaBaseline.A ?? S.dealt.A.etaMinutes) - elapsedMinSinceBase);
-        const remB = Math.max(0, (S.etaBaseline.B ?? S.dealt.B.etaMinutes) - elapsedMinSinceBase);
-
-        // --- keep card ETAs in sync with the live baseline (miles label) ---
         const miA = etaA.dataset.mi ? ` — ~${etaA.dataset.mi} mi` : "";
         const miB = etaB.dataset.mi ? ` — ~${etaB.dataset.mi} mi` : "";
         etaA.textContent = remA <= 0 ? `Landed${miA}` : `ETA ${fmtClock(remA)}${miA}`;
         etaB.textContent = remB <= 0 ? `Landed${miB}` : `ETA ${fmtClock(remB)}${miB}`;
-        // -------------------------------------------------------------------
 
         const rawLeader = remA < remB ? 'A' : 'B';
         const HYSTERESIS_MS = 2000;
         if (S._stableLeader == null) {
           S._stableLeader = rawLeader;
           S._leaderLockUntil = now + HYSTERESIS_MS;
-        } else if (rawLeader !== S._stableLeader) {
-          if (now >= S._leaderLockUntil) {
-            S._stableLeader = rawLeader;
-            S._leaderLockUntil = now + HYSTERESIS_MS;
-          }
+        } else if (rawLeader !== S._stableLeader && now >= S._leaderLockUntil) {
+          S._stableLeader = rawLeader;
+          S._leaderLockUntil = now + HYSTERESIS_MS;
         }
 
         const lead = S._stableLeader;
@@ -437,21 +430,26 @@ function startRaceAnimation(){
         const secToNext = Math.ceil(msToNext/1000);
         const mm = Math.floor(secToNext/60), ss = (secToNext%60).toString().padStart(2,'0');
 
-        timerEl.textContent =
+        setLog(
           `LIVE RACE - Flight ${lead} leads - ETA ${fmtClock(leadRem)} ` +
-          `(${lag} ${fmtClock(lagRem)}, Δ${fmtClock(gap)}) · next update in ${mm}:${ss}`;
+          `(${lag} ${fmtClock(lagRem)}, Δ${fmtClock(gap)}) · next update in ${mm}:${ss}`
+        );
 
         S._lastBannerUpdate = now;
       }
     }
 
-    if(progressA >= 100 || progressB >= 100){
-      if(updateInterval) clearInterval(updateInterval);
-      if(seat === S.turn) resolve();
-    }else{
-      requestAnimationFrame(step);
+    // Finish condition: real remaining time, not progress≥100
+    if ((remA <= 0 || remB <= 0) && !S._resolved){
+      stopRaceLoops();
+      if(seat === S.turn) resolve();  // only the picker resolves
+      return;
     }
-  })();
+
+    S._rafId = requestAnimationFrame(loop);
+  };
+
+  S._rafId = requestAnimationFrame(loop);
 }
 
 function updatePlanePosition(which, progress){
@@ -683,6 +681,12 @@ async function deal(){
   S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, 1e9);
   S.live = true;
 
+  // reset loop guards
+  stopRaceLoops();
+  S.startEta = {A:null,B:null};
+  S.etaBaseline = {A:null,B:null};
+  S.etaBaselineTime = null;
+
   barA.style.width="0%"; barB.style.width="0%";
   lineA.textContent="Dealing…"; lineB.textContent="Dealing…";
   etaA.textContent=""; etaB.textContent="";
@@ -722,16 +726,12 @@ async function deal(){
   S.pickedBy = {A:null, B:null};
   S.odds = null;
 
-  S.etaBaseline = {A:null, B:null};
-  S.etaBaselineTime = null;
-
   renderDealt();
 
   if(S.turn === seat){ 
     setLog("Your turn! Pick flight A or B. Your opponent gets the other one."); 
     showBubble(S.turn, "My pick!"); 
-  }
-  else { 
+  } else { 
     setLog(`Waiting for ${nameOf(S.turn)} to pick a flight...`); 
   }
 
@@ -741,7 +741,8 @@ async function deal(){
         airport:S.airport, bet:S.bet, live:true,
         dealt:S.dealt, destPos:S.destPos,
         racing:false, chosen:null, roundSeed:S.roundSeed, lastWinner:null,
-        pickedBy:{A:null, B:null}, odds:null
+        pickedBy:{A:null, B:null}, odds:null,
+        raceStartTime: null
       });
     }catch(e){ console.warn("[DL] room update(deal) failed:", e); }
   }
@@ -766,9 +767,10 @@ async function start(choice){
   S.racing = true;
   S.raceStartTime = Date.now();
 
-  // Baseline ETAs (fractional)
+  // Baseline ETAs (fractional) & freeze start ETA
   S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
   S.etaBaselineTime = S.raceStartTime;
+  S.startEta = { A: Math.max(0.1, S.dealt.A.etaMinutes), B: Math.max(0.1, S.dealt.B.etaMinutes) };
   S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
 
   S.pickedBy.A = choice === 'A' ? S.turn : (S.turn === "K" ? "C" : "K");
@@ -782,7 +784,6 @@ async function start(choice){
 
   setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${choice===longFlight?` (longshot pays ${mult.toFixed(2)}×)`:''}!`);
 
-  // Update Firebase so both players see the race
   if(roomRef){
     try {
       await window.firebaseUpdateDoc(roomRef, {
@@ -798,72 +799,51 @@ async function start(choice){
     }
   }
 
-  // Re-render to show who picked what
   renderDealt();
-
-  // Start the race animation
   startRaceAnimation();
 }
 
 async function resolve(){
+  if (S._resolved) return;
+  S._resolved = true;
+
   const {A,B}=S.dealt;
   const tie = (A.etaMinutes===B.etaMinutes);
   const winner = tie ? (S.roundSeed % 2 ? 'A' : 'B') : (A.etaMinutes<B.etaMinutes?'A':'B');
 
-  // Figure out who picked what
   const turnPlayer = S.turn; // Who picked this round
   const oppPlayer = S.turn === "K" ? "C" : "K";
   const turnChoice = S.chosen;
   const oppChoice = S.chosen === 'A' ? 'B' : 'A';
   
-  // Who won?
   const turnWon = (turnChoice === winner);
   const winnerPlayer = turnWon ? turnPlayer : oppPlayer;
   const loserPlayer = turnWon ? oppPlayer : turnPlayer;
 
-  // Apply longshot payout if applicable
   const usedMult = (S.odds && S.odds.long === winner && S.odds.mult) ? S.odds.mult : 1;
   const payout = Math.round(S.bet * usedMult);
 
-  // Update banks
   S.bank[winnerPlayer] += payout;
   S.bank[loserPlayer] -= payout;
   
   const winnerName = nameOf(winnerPlayer);
   const loserName  = nameOf(loserPlayer);
   setLog(`Flight ${winner} wins! ${winnerName} takes $${payout.toLocaleString()} from ${loserName}${usedMult>1?` (longshot ${usedMult.toFixed(2)}×)`:''}.`);
-  
-  // Character reactions
+
   showBubble(winnerPlayer, "YES! Got it!", 1500);
   showBubble(loserPlayer, "Damn!", 1200);
-  talk(winnerPlayer, true);
-  byId(winnerPlayer + "_mouth").classList.add("smile");
-  setTimeout(() => {
-    talk(winnerPlayer, false);
-    byId(winnerPlayer + "_mouth").classList.remove("smile");
-  }, 1500);
-  byId(loserPlayer + "_mouth").classList.add("frown");
-  eyes(loserPlayer, "left");
-  setTimeout(() => {
-    eyes(loserPlayer, "center");
-    byId(loserPlayer + "_mouth").classList.remove("frown");
-  }, 1200);
 
   updateHUD();
   S.racing=false;
   S.lastWinner = winner;
   S.turn = (S.turn==="K"?"C":"K"); // Alternate turns
   S.pickedBy = {A:null, B:null}; // Reset picks
-  
-  // Check win conditions
+  stopRaceLoops();
+
   if(S.bank.K >= 5000 && S.bank.C <= -5000) {
     setLog(`🎉 ${nameOf('K').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000! 🎉`);
-    showBubble("K", "I'm the champion!", 3000);
-    showBubble("C", "Good game!", 3000);
   } else if(S.bank.C >= 5000 && S.bank.K <= -5000) {
     setLog(`🎉 ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000! 🎉`);
-    showBubble("C", "Victory is mine!", 3000);
-    showBubble("K", "Well played!", 3000);
   }
 
   if(roomRef){
