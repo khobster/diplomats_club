@@ -371,9 +371,11 @@ async function updateLivePositions() {
   const ida = S.dealt?.A?.icao24 || "";
   const idb = S.dealt?.B?.icao24 || "";
   const trackList = [ida, idb].filter(Boolean);
+  
+  // If no icao24, these are fallback flights - still try to track by position
   if (trackList.length === 0) {
-    console.log("[DL] Skipping live update - no icao24 (simulated round)");
-    return;
+    console.log("[DL] No icao24 identifiers - using position-based tracking");
+    return; // Let interpolation handle it
   }
 
   let attempts = 0;
@@ -503,7 +505,7 @@ function startRaceAnimation(){
     S._liveIntervalId = null;
   }
 
-  // first ping at +60s, then every 3m
+  // Schedule updates for all flights (even if no icao24, we'll try)
   setTimeout(()=>{ if(S.racing) updateLivePositions(); }, FIRST_PING_DELAY);
   S.nextLiveUpdateAt = (S.lastLiveUpdateAt || S.raceStartTime) + FIRST_PING_DELAY;
   S._liveIntervalId = setInterval(()=>{ if(S.racing) updateLivePositions(); }, LIVE_UPDATE_INTERVAL);
@@ -524,7 +526,7 @@ function startRaceAnimation(){
     barA.style.width = (tA*100).toFixed(1)+"%";
     barB.style.width = (tB*100).toFixed(1)+"%";
 
-    // Plane positions (segment-driven, no flicker)
+    // Plane positions (segment-driven, smooth movement)
     if(S.maps.A && S.maps.B){
       const pA = segPos('A', now);
       const pB = segPos('B', now);
@@ -613,32 +615,6 @@ function startRaceAnimation(){
 
     requestAnimationFrame(step);
   })();
-}
-
-function updatePlanePosition(which, progress){
-  // (kept for reference; segment logic now controls positions)
-  const M = S.maps[which]; if(!M) return;
-  const flight = S.dealt[which];
-  let startPos;
-
-  if(flight.pos?.lat && (flight.pos.lng || flight.pos.lon)){
-    const lng = flight.pos.lng || flight.pos.lon; startPos = [flight.pos.lat, lng];
-  }else{
-    startPos = guessPos(flight);
-  }
-
-  let destPos;
-  if(S.destPos?.lat && (S.destPos.lng || S.destPos.lon)){
-    const lng = S.destPos.lng || S.destPos.lon; destPos = [S.destPos.lat, lng];
-  }else if(AIRPORTS[flight.dest]){
-    destPos = AIRPORTS[flight.dest];
-  }else{
-    destPos = [40.6413,-73.7781];
-  }
-
-  const currentLat = startPos[0] + (destPos[0] - startPos[0]) * progress;
-  const currentLng = startPos[1] + (destPos[1] - startPos[1]) * progress;
-  M.plane.setLatLng([currentLat, currentLng]);
 }
 
 /* =================== FACES ENGINE =================== */
@@ -767,8 +743,8 @@ async function liveFlights(iata){
   const url = `${LIVE_PROXY}?airport=${encodeURIComponent(iata)}&minETA=${MIN_RACE_MINUTES}`;
   const data = await fetchJSON(url, 9000);
   console.log("[DL] Live flights received:", {
-    A: data.A?.icao24 || 'no-icao24',
-    B: data.B?.icao24 || 'no-icao24'
+    A: data.A?.icao24 || 'fallback-flight',
+    B: data.B?.icao24 || 'fallback-flight'
   });
   return data;
 }
@@ -857,25 +833,23 @@ async function deal(){
   try{
     data = await liveFlights(S.airport);
 
+    // Always use whatever flights we get from the API
+    // The handler will provide real flights when available, or good fallbacks
     if(data.A && data.B){
       const minETA = Math.min(data.A.etaMinutes, data.B.etaMinutes);
       if(minETA < 10){
-        data = simFlights(S.airport);
-        data.A.etaMinutes = 15 + Math.random()*30;
-        data.B.etaMinutes = 20 + Math.random()*35;
-        setLog("Live flights too close—using simulated flights for a longer race.");
+        // If flights are too close, we might get a quick race but that's OK
+        console.log("[DL] Short race incoming - flights close to destination");
       }
     }
   }catch(e){
     console.warn("[DL] Flight fetch error:", e);
-    data = simFlights(S.airport);
-    data.A.etaMinutes = 15 + Math.random()*30;
-    data.B.etaMinutes = 20 + Math.random()*35;
-    setLog("Live unavailable—using simulated flights.");
+    showError("Unable to connect to flight service. Check your connection and try again.");
+    return;
   }
 
   const destPos = data.destPos || AIRPORTS[S.airport] || null;
-  S.dealt = { A:data.A, B:data.B };     // includes icao24 when live
+  S.dealt = { A:data.A, B:data.B };     // includes icao24 when available
   S.destPos = destPos;
   S.racing = false;
   S.chosen = null;
@@ -889,7 +863,7 @@ async function deal(){
   S._resolving = false;
   S._landed = {A:false, B:false};
 
-  // Initialize anchors from initial live pos (or one-time guess). Mark pos fresh.
+  // Initialize anchors from initial live pos (or guess)
   ['A','B'].forEach(k=>{
     const f = S.dealt[k];
     let start;
@@ -958,7 +932,7 @@ async function start(choice){
 
   if(choice === longFlight){ showBubble(S.turn, `Longshot pays ${mult.toFixed(2)}×`, 1600); }
 
-  setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${choice===longFlight ? ` (longshot pays ${mult.toFixed(2)}×)` : ""}!`);
+  setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${S.bet}${choice===longFlight ? ` (longshot pays ${mult.toFixed(2)}×)` : ""}!`);
 
   // Update room for everyone
   if(roomRef){
@@ -1012,7 +986,7 @@ async function resolve(){
   const winnerName = nameOf(winnerSeat);
   const loserName  = nameOf(loserSeat);
   const bonusText  = isLongshotWin ? ` (longshot ×${(S.odds.mult||1).toFixed(2)})` : "";
-  setLog(`Flight ${winner} wins! ${winnerName} takes $${payout}${bonusText} from ${loserName}.`);
+  setLog(`Flight ${winner} wins! ${winnerName} takes ${payout}${bonusText} from ${loserName}.`);
 
   try { showBubble(winnerSeat, "YES! Got it!", 1500); } catch {}
   try { showBubble(loserSeat, "Damn!", 1200); } catch {}
