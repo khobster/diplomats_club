@@ -268,6 +268,7 @@ const fmtClock = (minF)=>{
   return `${minutes}:${seconds.toString().padStart(2,'0')}`;
 };
 const kmToMi = (km)=> Math.round(km * 0.621371);
+const sleep = (ms)=> new Promise(r=>setTimeout(r, ms));
 
 function lerp(a,b,t){ return [ a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t ]; }
 function clamp01(x){ return Math.max(0, Math.min(1, x)); }
@@ -698,17 +699,24 @@ async function findAirportAndFlights(){
   const candidates = shuffle(Object.keys(AIRPORTS));
   let lastErr = null;
 
-  for (const iata of candidates){
+  for (let i=0; i<candidates.length; i++){
+    const iata = candidates[i];
+    setLog(`Scanning ${iata} for two live arrivals… (${i+1}/${candidates.length})`);
     try{
       const data = await liveFlights(iata);
       if (data?.A && data?.B){
         return { airport: iata, data };
       }
+      // polite pacing even if 200 with no usable flights (shouldn’t happen)
+      await sleep(900);
     }catch(e){
       lastErr = e;
-      // 503 from handler when no live flights — try next
-      if (!/HTTP 5/.test(e.message)) {
-        // network or other status — still continue trying others
+      // 503 from handler when no live flights / rate-limit — pace ourselves
+      if (/HTTP 503/.test(e.message)) {
+        await sleep(1100);
+      } else {
+        // transient other error; brief backoff
+        await sleep(800);
       }
     }
   }
@@ -994,7 +1002,6 @@ resetBtn.addEventListener("click", async ()=>{
 
 newRoomBtn.addEventListener("click", createRoom);
 copyBtn.addEventListener("click", copyInvite);
-
 
 /* =================== Init =================== */
 (async function init(){
