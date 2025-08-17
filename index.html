@@ -100,14 +100,14 @@
     #bubK{ left:24%; top:24% }
     #bubC{ left:78%; top:24% }
 
-    /* Controls (LIVE removed: always live) */
+    /* Controls */
     .controls{
       display:flex; gap:8px; flex-wrap:wrap; justify-content:center;
       border:1px solid var(--ring); border-radius:999px; padding:6px 8px;
       box-shadow:0 8px 24px var(--shadow); background:#fff;
     }
     .ctl{display:flex; align-items:center; gap:8px}
-    .ctl input[type="text"], .ctl input[type="number"]{
+    .ctl input[type="number"]{
       width:86px; padding:8px 10px; border-radius:999px; border:1px solid var(--ring); text-align:center; font-weight:800
     }
 
@@ -193,9 +193,11 @@
       </svg>
     </div>
 
-    <!-- Controls -->
+    <!-- Controls (lean: auto-picked airport shown, not editable) -->
     <div class="controls">
-      <div class="ctl"><input id="airport" type="text" maxlength="4" value="JFK" placeholder="IATA" /></div>
+      <div class="ctl">
+        <div class="pill" id="autoAirport">Airport: <strong>—</strong></div>
+      </div>
       <div class="ctl"><span>Bet</span><input id="betIn" type="number" value="50" step="25" min="25" /></div>
       <div class="ctl"><button id="deal" class="btn primary">Deal flights</button></div>
       <div class="ctl"><button id="reset" class="btn">Reset bank</button></div>
