@@ -1,8 +1,8 @@
 /* Diplomat's Lounge — Always-live + icao24 tracking + blind-pick + fractional ETAs + miles
    - Blind pick: ETAs/miles hidden until A/B is chosen
    - Ping schedule: first at 60s then every 3m (single interval, no dupes)
-   - Position freshness: fall back to interpolation if last live pos is stale
-   - Cards show miles (not km) after pick; banner + cards stay in sync
+   - Segment anchoring: markers glide smoothly and land exactly at ETA=0
+   - Cards/banners show live miles (not km) after pick; banner + cards stay in sync
 */
 
 /* ========= Lambda Gateway URL ========= */
@@ -207,7 +207,7 @@ const REAL_TIME_RACING = true;
 const FIRST_PING_DELAY = 60 * 1000;           // 60s
 const LIVE_UPDATE_INTERVAL = 3 * 60 * 1000;   // 3 minutes thereafter
 const MIN_RACE_MINUTES = 15;
-const POS_FRESH_MS = 4 * 60 * 1000;          // live pos considered stale after 4 min
+const POS_FRESH_MS = 4 * 60 * 1000;          // (kept for reference; anchor logic drives dots)
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
   YYZ:[43.6777,-79.6248], YUL:[45.4706,-73.7408], YVR:[49.1951,-123.1779],
@@ -236,7 +236,7 @@ const S = {
   pickedBy: {A:null, B:null},
   odds: null,
 
-  // Δ baseline
+  // Δ baseline (for banner countdown)
   etaBaseline: { A: null, B: null },
   etaBaselineTime: null,
   _lastBannerUpdate: 0,
@@ -249,8 +249,15 @@ const S = {
   nextLiveUpdateAt: null,
   _liveIntervalId: null,
 
-  // live position freshness
-  lastPosUpdateAt: { A: 0, B: 0 }
+  // live position freshness (retained for info)
+  lastPosUpdateAt: { A: 0, B: 0 },
+
+  // segment anchors + landed flags
+  seg: {
+    A: { startPos: null, startTime: 0, etaAtStart: 0 },
+    B: { startPos: null, startTime: 0, etaAtStart: 0 }
+  },
+  _landed: { A:false, B:false }
 };
 
 /* =================== Utilities =================== */
@@ -262,6 +269,44 @@ const fmtClock = (minF)=>{
   return `${minutes}:${seconds.toString().padStart(2,'0')}`;
 };
 const kmToMi = (km)=> Math.round(km * 0.621371);
+
+function lerp(a,b,t){ return [ a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t ]; }
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function milesBetween(lat1, lon1, lat2, lon2){
+  const Rk=6371, toRad=Math.PI/180;
+  const dLat=(lat2-lat1)*toRad, dLon=(lon2-lon1)*toRad;
+  const s1=Math.sin(dLat/2), s2=Math.sin(dLon/2);
+  const c=2*Math.asin(Math.sqrt(s1*s1 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*s2*s2));
+  return Math.round(Rk*c*0.621371);
+}
+function destLatLng(){
+  const d = S.destPos || {};
+  const lng = d.lng ?? d.lon ?? -73.7781;
+  const lat = d.lat ?? 40.6413;
+  return [lat, lng];
+}
+function anchorSegment(which, startPosLatLng, etaMinutes, when=Date.now()){
+  S.seg[which] = {
+    startPos: startPosLatLng,
+    startTime: when,
+    etaAtStart: Math.max(0.01, Number(etaMinutes) || 0.01)
+  };
+}
+function segRemaining(which, now=Date.now()){
+  const seg = S.seg[which];
+  if (!seg || !seg.startPos) return { t:0, rem: S.dealt?.[which]?.etaMinutes ?? 0 };
+  const elapsedMin = Math.max(0, (now - seg.startTime)/60000);
+  const rem = Math.max(0, seg.etaAtStart - elapsedMin);
+  const t = seg.etaAtStart <= 0 ? 1 : clamp01(1 - (rem / seg.etaAtStart));
+  return { t, rem };
+}
+function segPos(which, now=Date.now()){
+  const seg = S.seg[which];
+  const dst = destLatLng();
+  if (!seg || !seg.startPos) return dst;
+  const { t } = segRemaining(which, now);
+  return lerp(seg.startPos, dst, t);
+}
 
 // small fetch with timeout so we don't hang a race on a long network stall
 async function fetchJSON(url, timeoutMs=9000){
@@ -315,7 +360,7 @@ function updateConnectionStatus(success) {
   }
 }
 
-/* =================== Live Flight Updates (WITH FIXES) =================== */
+/* =================== Live Flight Updates (segment re-anchoring) =================== */
 async function updateLivePositions() {
   if(!S.racing || !S.dealt || !S.live) return;
 
@@ -331,7 +376,6 @@ async function updateLivePositions() {
     return;
   }
 
-  // Add retry logic for fetch/CORS/network
   let attempts = 0;
   const maxAttempts = 3;
   while (attempts < maxAttempts) {
@@ -339,7 +383,7 @@ async function updateLivePositions() {
       const url = `${LIVE_PROXY}?airport=${encodeURIComponent(S.airport)}&track=${encodeURIComponent(trackList.join(','))}`;
       console.log(`[DL] Fetching live updates (attempt ${attempts + 1})...`);
       
-      const data = await fetchJSON(url, 9000 + (attempts * 2000)); // Increase timeout on retries
+      const data = await fetchJSON(url, 9000 + (attempts * 2000));
 
       if (typeof data.updatedAt === "number") {
         S.lastLiveUpdateAt = data.updatedAt;
@@ -357,62 +401,49 @@ async function updateLivePositions() {
       }
 
       let changed = false;
+      const now = Date.now();
 
-      // Only update position if significantly different (prevents flicker)
-      if(updatedA && updatedA.pos) {
-        const oldPos = S.dealt.A.pos;
-        const newPos = updatedA.pos;
-        if (!oldPos || 
-            Math.abs(oldPos.lat - newPos.lat) > 0.01 || 
-            Math.abs((oldPos.lng || oldPos.lon) - (newPos.lng || newPos.lon)) > 0.01) {
-          S.dealt.A.pos = newPos;
-          S.lastPosUpdateAt.A = Date.now();
-          changed = true;
+      function rebase(which, updated){
+        const f = S.dealt[which];
+        // current dot along the *old* segment
+        const cur = segPos(which, now);
+
+        // if we got a fresh live pos, anchor to it; else anchor to the current segment pos
+        const hasLive = !!(updated.pos && Number.isFinite(updated.pos.lat) && Number.isFinite(updated.pos.lng ?? updated.pos.lon));
+        const anchor = hasLive ? [updated.pos.lat, (updated.pos.lng ?? updated.pos.lon)] : cur;
+
+        if (hasLive) {
+          f.pos = { lat: anchor[0], lng: anchor[1] };
+          S.lastPosUpdateAt[which] = now;
         }
-        if (Number.isFinite(updatedA.etaMinutes)) {
-          const prev = S.dealt.A.etaMinutes;
-          if (Math.abs(prev - updatedA.etaMinutes) > 0.1) {
-            S.dealt.A.etaMinutes = updatedA.etaMinutes;
-            console.log(`[DL] Flight A ETA: ${prev.toFixed(1)} → ${updatedA.etaMinutes.toFixed(1)} min`);
-            S.etaBaseline.A = updatedA.etaMinutes; // per-flight baseline refresh
-            changed = true;
-          }
+        if (Number.isFinite(updated.etaMinutes)) {
+          const prev = f.etaMinutes;
+          f.etaMinutes = updated.etaMinutes;
+          console.log(`[DL] Flight ${which} ETA: ${prev?.toFixed?.(1) ?? '—'} → ${updated.etaMinutes.toFixed(1)} min`);
         }
+
+        // re-anchor segment and re-base countdown
+        anchorSegment(which, anchor, f.etaMinutes, now);
+        changed = true;
       }
-      
-      if(updatedB && updatedB.pos) {
-        const oldPos = S.dealt.B.pos;
-        const newPos = updatedB.pos;
-        if (!oldPos || 
-            Math.abs(oldPos.lat - newPos.lat) > 0.01 || 
-            Math.abs((oldPos.lng || oldPos.lon) - (newPos.lng || newPos.lon)) > 0.01) {
-          S.dealt.B.pos = newPos;
-          S.lastPosUpdateAt.B = Date.now();
-          changed = true;
-        }
-        if (Number.isFinite(updatedB.etaMinutes)) {
-          const prev = S.dealt.B.etaMinutes;
-          if (Math.abs(prev - updatedB.etaMinutes) > 0.1) {
-            S.dealt.B.etaMinutes = updatedB.etaMinutes;
-            console.log(`[DL] Flight B ETA: ${prev.toFixed(1)} → ${updatedB.etaMinutes.toFixed(1)} min`);
-            S.etaBaseline.B = updatedB.etaMinutes; // per-flight baseline refresh
-            changed = true;
-          }
-        }
-      }
+
+      if (updatedA) rebase('A', updatedA);
+      if (updatedB) rebase('B', updatedB);
 
       if(changed) {
-        // DO NOT reset etaBaselineTime (prevents timer jump)
+        // Re-base the banner baseline to NOW to keep MM:SS in sync with segments
+        S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
+        S.etaBaselineTime = now;
+
         renderDealt();
         if(roomRef) {
-          await window.firebaseUpdateDoc(roomRef, { dealt: S.dealt }).catch(e => {
-            console.warn("[DL] Failed to sync live updates:", e);
-          });
+          try { await window.firebaseUpdateDoc(roomRef, { dealt: S.dealt }); } 
+          catch(e) { console.warn("[DL] Failed to sync live updates:", e); }
         }
       }
       
-      updateConnectionStatus(true); // Success
-      break; // exit retry loop
+      updateConnectionStatus(true);
+      break; // success
       
     } catch(e) {
       attempts++;
@@ -421,7 +452,7 @@ async function updateLivePositions() {
         console.warn("[DL] All live update attempts failed, continuing with interpolation");
         updateConnectionStatus(false);
       } else {
-        await new Promise(res => setTimeout(res, 1000 * attempts)); // simple backoff
+        await new Promise(res => setTimeout(res, 1000 * attempts));
       }
     }
   }
@@ -440,6 +471,22 @@ function startRaceAnimation(){
   }else{
     raceMs = 6500;
   }
+
+  // Ensure anchors exist (e.g., joined mid-race)
+  ['A','B'].forEach(k=>{
+    if (!S.seg[k]?.startPos) {
+      let start;
+      const f = S.dealt[k];
+      if (f?.pos?.lat && (f.pos.lng ?? f.pos.lon) != null){
+        start = [f.pos.lat, (f.pos.lng ?? f.pos.lon)];
+        S.lastPosUpdateAt[k] = Date.now();
+      } else {
+        const g = guessPos(f);
+        start = [g[0], g[1]];
+      }
+      anchorSegment(k, start, f.etaMinutes, S.raceStartTime || Date.now());
+    }
+  });
 
   if (!S.raceStartTime) S.raceStartTime = Date.now();
   S.raceDuration = raceMs;
@@ -470,38 +517,22 @@ function startRaceAnimation(){
     }
 
     const now = Date.now();
-    const elapsed = now - S.raceStartTime;
 
-    // Use the latest ETA minutes (fractional)
-    const currentA = S.dealt.A.etaMinutes;
-    const currentB = S.dealt.B.etaMinutes;
+    // Progress bars from segment progress (not raw ETAs)
+    const { t: tA } = segRemaining('A', now);
+    const { t: tB } = segRemaining('B', now);
+    barA.style.width = (tA*100).toFixed(1)+"%";
+    barB.style.width = (tB*100).toFixed(1)+"%";
 
-    const progressA = Math.min(100, (elapsed / (currentA * 60 * 1000)) * 100);
-    const progressB = Math.min(100, (elapsed / (currentB * 60 * 1000)) * 100);
-    barA.style.width = progressA.toFixed(1)+"%";
-    barB.style.width = progressB.toFixed(1)+"%";
-
-    // Plane positions (prefer fresh live; otherwise interpolate so nothing "sticks")
+    // Plane positions (segment-driven, no flicker)
     if(S.maps.A && S.maps.B){
-      const liveAFresh = S.dealt.A.pos && (now - (S.lastPosUpdateAt.A || 0) < POS_FRESH_MS);
-      const liveBFresh = S.dealt.B.pos && (now - (S.lastPosUpdateAt.B || 0) < POS_FRESH_MS);
-
-      if (liveAFresh) {
-        const p = S.dealt.A.pos; S.maps.A.plane.setLatLng([p.lat, p.lng||p.lon]);
-      } else {
-        if (S.dealt.A.pos && !liveAFresh) console.log("[DL] Flight A live pos stale → interpolate");
-        S.dealt.A.pos = null; updatePlanePosition('A', progressA/100);
-      }
-
-      if (liveBFresh) {
-        const p = S.dealt.B.pos; S.maps.B.plane.setLatLng([p.lat, p.lng||p.lon]);
-      } else {
-        if (S.dealt.B.pos && !liveBFresh) console.log("[DL] Flight B live pos stale → interpolate");
-        S.dealt.B.pos = null; updatePlanePosition('B', progressB/100);
-      }
+      const pA = segPos('A', now);
+      const pB = segPos('B', now);
+      S.maps.A.plane.setLatLng(pA);
+      S.maps.B.plane.setLatLng(pB);
     }
 
-    // Banner + card ETA sync (1 Hz)
+    // Banner + card ETA/miles sync (1 Hz)
     if (REAL_TIME_RACING && S.racing) {
       if (now - S._lastBannerUpdate >= 1000) {
         const baseTime = S.etaBaselineTime || S.raceStartTime || now;
@@ -510,8 +541,14 @@ function startRaceAnimation(){
         const remA = Math.max(0, (S.etaBaseline.A ?? S.dealt.A.etaMinutes) - elapsedMinSinceBase);
         const remB = Math.max(0, (S.etaBaseline.B ?? S.dealt.B.etaMinutes) - elapsedMinSinceBase);
 
-        // After pick: show ETAs & miles; Before pick: renderDealt() keeps them hidden
+        // After pick: show ETAs & live miles
         if (S.chosen) {
+          const [dlat,dlng] = destLatLng();
+          const [alat,alng] = segPos('A', now);
+          const [blat,blng] = segPos('B', now);
+          etaA.dataset.mi = milesBetween(alat,alng,dlat,dlng);
+          etaB.dataset.mi = milesBetween(blat,blng,dlat,dlng);
+
           const miA = etaA.dataset.mi ? ` — ~${etaA.dataset.mi} mi` : "";
           const miB = etaB.dataset.mi ? ` — ~${etaB.dataset.mi} mi` : "";
           etaA.textContent = remA <= 0 ? `Landed${miA}` : `ETA ${fmtClock(remA)}${miA}`;
@@ -546,7 +583,20 @@ function startRaceAnimation(){
 
         S._lastBannerUpdate = now;
 
-        // If either reaches zero, resolve immediately (WITH FIX)
+        // Landed handling (snap to airport once & bubble)
+        if (!S._landed.A && remA <= 0) {
+          S._landed.A = true;
+          const [lat,lng] = destLatLng();
+          if (S.maps.A) S.maps.A.plane.setLatLng([lat,lng]);
+          if (S.pickedBy.A) showBubble(S.pickedBy.A, "Landed!", 1500);
+        }
+        if (!S._landed.B && remB <= 0) {
+          S._landed.B = true;
+          const [lat,lng] = destLatLng();
+          if (S.maps.B) S.maps.B.plane.setLatLng([lat,lng]);
+          if (S.pickedBy.B) showBubble(S.pickedBy.B, "Landed!", 1500);
+        }
+
         if (remA <= 0 || remB <= 0) {
           if (S._liveIntervalId) { 
             clearInterval(S._liveIntervalId); 
@@ -561,17 +611,12 @@ function startRaceAnimation(){
       }
     }
 
-    // Fallback end condition via progress bars
-    if(progressA >= 100 || progressB >= 100){
-      if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
-      if(seat === S.turn && !S._resolving) resolve();
-    }else{
-      requestAnimationFrame(step);
-    }
+    requestAnimationFrame(step);
   })();
 }
 
 function updatePlanePosition(which, progress){
+  // (kept for reference; segment logic now controls positions)
   const M = S.maps[which]; if(!M) return;
   const flight = S.dealt[which];
   let startPos;
@@ -770,7 +815,7 @@ function renderDealt(){
     cardB.appendChild(badge);
   }
 
-  // Compute & cache miles (don’t display until pick)
+  // Compute & cache miles (initial snapshot; live miles will update every second during race)
   try{ 
     const miA = fitAndRender('A', A, S.destPos); 
     etaA.dataset.mi = miA; 
@@ -841,8 +886,22 @@ async function deal(){
   S.etaBaseline = {A:null, B:null};
   S.etaBaselineTime = null;
 
-  S.lastPosUpdateAt = { A: 0, B: 0 };
   S._resolving = false;
+  S._landed = {A:false, B:false};
+
+  // Initialize anchors from initial live pos (or one-time guess). Mark pos fresh.
+  ['A','B'].forEach(k=>{
+    const f = S.dealt[k];
+    let start;
+    if (f?.pos?.lat && (f.pos.lng ?? f.pos.lon) != null){
+      start = [f.pos.lat, (f.pos.lng ?? f.pos.lon)];
+      S.lastPosUpdateAt[k] = Date.now();
+    } else {
+      const g = guessPos(f);
+      start = [g[0], g[1]];
+    }
+    anchorSegment(k, start, f.etaMinutes, Date.now());
+  });
 
   renderDealt();
 
@@ -917,7 +976,7 @@ async function start(choice){
     }
   }
 
-  renderDealt(); // still shows hidden text; the race loop will start MM:SS
+  renderDealt(); // still shows hidden text; the race loop will take over
   startRaceAnimation();
 }
 
