@@ -992,6 +992,10 @@ resetBtn.addEventListener("click", async ()=>{
   }
 });
 
+newRoomBtn.addEventListener("click", createRoom);
+copyBtn.addEventListener("click", copyInvite);
+
+
 /* =================== Init =================== */
 (async function init(){
   setSeatLabel(seat);
