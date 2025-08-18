@@ -1006,7 +1006,7 @@ copyBtn.addEventListener("click", copyInvite);
   img.onload = function() {
     const stage = byId("stage");
     const placeholder = stage?.querySelector(".stage-placeholder");
-    if(placeholder) remove();
+if (placeholder) placeholder.remove();
     
     const actualImg = document.createElement("img");
     actualImg.src = "./sofawithkesslerandcajun.png";
