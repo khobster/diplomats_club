@@ -2,7 +2,7 @@
    - Auto-picks a viable airport (tries a shuffled list of hubs until two live arrivals are found)
    - Blind pick (ETAs/miles hidden until A/B is chosen)
    - Segment anchoring: markers glide smoothly and land exactly at ETA=0
-   - Live re-basing: when new data arrives, segments re-anchor to fresh live positions
+   - Live re-basing: when new data arrives, segments re-anchor to fresh live positions (continuity-preserving)
    - Cards/banners show live miles (not km) after pick; banner + cards stay in sync
 */
 
@@ -135,7 +135,6 @@ async function ensureRoom(){
     if(S.dealt) renderDealt();
 
     if(S.racing && (!wasRacing || S.chosen !== oldChosen)){
-      // Initialize Δ baseline once per race
       if (!S.etaBaselineTime) {
         S.etaBaseline = { A: S.dealt?.A?.etaMinutes ?? 0, B: S.dealt?.B?.etaMinutes ?? 0 };
         S.etaBaselineTime = S.raceStartTime || Date.now();
@@ -348,7 +347,7 @@ function updateConnectionStatus(success) {
   }
 }
 
-/* =================== Live Flight Updates (segment re-anchoring) =================== */
+/* =================== Live Flight Updates (segment re-anchoring, continuity-preserving) =================== */
 async function updateLivePositions() {
   if(!S.racing || !S.dealt || !S.live || !S.airport) return;
 
@@ -358,7 +357,8 @@ async function updateLivePositions() {
 
   const ida = S.dealt?.A?.icao24 || "";
   const idb = S.dealt?.B?.icao24 || "";
-  const trackList = [ida, idb].filter(Boolean);
+  const hex = /^[0-9a-f]{6}$/i;
+  const trackList = [ida, idb].filter(id => id && (id.startsWith('sim') || hex.test(id)));
   if (trackList.length === 0) return;
 
   let attempts = 0;
@@ -384,20 +384,36 @@ async function updateLivePositions() {
       const now = Date.now();
       let changed = false;
 
+      // === continuity-preserving rebase ===
       function rebase(which, updated){
         const f = S.dealt[which];
-        const cur = segPos(which, now);
-        const hasLive = !!(updated.pos && Number.isFinite(updated.pos.lat) && Number.isFinite(updated.pos.lng));
-        const anchor = hasLive ? [updated.pos.lat, updated.pos.lng] : cur;
+        const now = Date.now();
 
-        if (hasLive) f.pos = { lat: anchor[0], lng: anchor[1] };
+        // Calculate current progress before altering anchors
+        const { t: tBefore } = segRemaining(which, now);
+        const tSafe = Math.max(0, Math.min(0.99, tBefore)); // keep within (0,1)
+
+        // live anchor if present; else keep current anchor to avoid jumps
+        const hasLive = !!(updated.pos && Number.isFinite(updated.pos.lat) && Number.isFinite(updated.pos.lng));
+        const anchor = hasLive
+          ? [updated.pos.lat, updated.pos.lng]
+          : (S.seg[which]?.startPos || segPos(which, now));
+
+        // refresh ETA if provided
         if (Number.isFinite(updated.etaMinutes)) {
           const prev = f.etaMinutes;
           f.etaMinutes = updated.etaMinutes;
           console.log(`[DL] Flight ${which} ETA: ${prev?.toFixed?.(1) ?? '—'} → ${updated.etaMinutes.toFixed(1)} min`);
         }
 
-        anchorSegment(which, anchor, f.etaMinutes, now);
+        // Preserve progress while adopting new ETA
+        const remNew = Math.max(0.01, Number(f.etaMinutes) || 0.01);
+        const etaAtStartNew = remNew / (1 - Math.max(0.001, tSafe));
+        const elapsedNewMin = etaAtStartNew * tSafe;
+        const startTimeNew = now - elapsedNewMin * 60000;
+
+        S.seg[which] = { startPos: anchor, startTime: startTimeNew, etaAtStart: etaAtStartNew };
+        if (hasLive) f.pos = { lat: anchor[0], lng: anchor[1] };
         changed = true;
       }
 
@@ -405,7 +421,7 @@ async function updateLivePositions() {
       if (updatedB) rebase('B', updatedB);
 
       if(changed) {
-        // Re-base the banner baseline to NOW to keep MM:SS in sync with segments
+        // Re-base banner/card countdowns to the latest ETA snapshot (visuals stay smooth)
         S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
         S.etaBaselineTime = now;
 
@@ -497,7 +513,6 @@ function startRaceAnimation(){
       const pB = segPos('B', now);
       S.maps.A.plane.setLatLng(pA);
       S.maps.B.plane.setLatLng(pB);
-      // keep the polylines tied to current position → destination (no “backwards” lines)
       const dst = destLatLng();
       S.maps.A.line.setLatLngs([pA, dst]);
       S.maps.B.line.setLatLngs([pB, dst]);
@@ -554,7 +569,7 @@ function startRaceAnimation(){
 
         S._lastBannerUpdate = now;
 
-        // Landed handling (snap to airport once & bubble)
+        // Landed handling
         if (!S._landed.A && remA <= 0) {
           S._landed.A = true;
           const [lat,lng] = destLatLng();
@@ -707,15 +722,12 @@ async function findAirportAndFlights(){
       if (data?.A && data?.B){
         return { airport: iata, data };
       }
-      // polite pacing even if 200 with no usable flights (shouldn’t happen)
       await sleep(900);
     }catch(e){
       lastErr = e;
-      // 503 from handler when no live flights / rate-limit — pace ourselves
       if (/HTTP 503/.test(e.message)) {
         await sleep(1100);
       } else {
-        // transient other error; brief backoff
         await sleep(800);
       }
     }
@@ -819,7 +831,7 @@ async function deal(){
   S.airport = pickedAirport;
   S.destPos = data.destPos || AIRPORTS[pickedAirport] || null;
 
-  // Selected flights (real-only)
+  // Selected flights (real-only or simulated if needed)
   S.dealt = { A:data.A, B:data.B };
   S.racing = false;
   S.chosen = null;
