@@ -230,7 +230,7 @@ const S = {
   pickedBy: {A:null, B:null},
   odds: null,
 
-  // Baseline for banner countdown
+  // Baseline for banner countdown (anchored at race start; only moved downward)
   etaBaseline: { A: null, B: null },
   etaBaselineTime: null,
   _lastBannerUpdate: 0,
@@ -384,25 +384,43 @@ async function updateLivePositions() {
         // Current on-screen point (do not move this)
         const P = segPos(which, now);
 
-        // Live anchor (we use it to update f.pos but NOT to force a jump)
+        // Live anchor (recorded but not forced visually)
         const hasLive = !!(updated.pos && Number.isFinite(updated.pos.lat) && Number.isFinite(updated.pos.lng));
         if (hasLive) f.pos = { lat: updated.pos.lat, lng: updated.pos.lng };
 
-        // New ETA
-        if (Number.isFinite(updated.etaMinutes)) {
-          const prev = f.etaMinutes;
-          f.etaMinutes = updated.etaMinutes;
-          console.log(`[DL] Flight ${which} ETA: ${prev?.toFixed?.(1) ?? '—'} → ${updated.etaMinutes.toFixed(1)} min`);
-        }
+        // New ETA from API (minutes from *now* to landing)
+        let apiETA = Number.isFinite(updated.etaMinutes) ? updated.etaMinutes : f.etaMinutes;
 
-        // Keep the display at P; start from P; fly to dest with new ETA
-        const dst = destLatLng();
+        // ---- CRITICAL: prevent "time being added" on updates ----
+        // Compute how much should remain based on the ORIGINAL race start
+        const raceStart = S.raceStartTime || now;
+        const elapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
+        const originalETA = S.etaBaseline[which] ?? f.etaMinutes; // baseline at start
+        const expectedRemaining = Math.max(0, originalETA - elapsedSinceRaceStart);
+
+        // Allow a tiny upward wiggle (e.g., vectoring), but clamp hard otherwise
+        const MAX_UP_MIN = 2; // minutes
+        const adjustedETA = Math.min(apiETA, expectedRemaining + MAX_UP_MIN);
+
+        // Keep the display at P; start from P; fly to dest with adjusted ETA
         const start = [P[0], P[1]];
-        const remNew = Math.max(0.01, Number(f.etaMinutes) || 0.01);
+        const remNew = Math.max(0.01, adjustedETA);
 
-        // With start=P, t(now) should be 0 → choose etaAtStart' = remNew and startTime'=now
-        // (This makes motion continuous and monotonic.)
+        // Set up the segment to continue from current position
         S.seg[which] = { startPos: start, startTime: now, etaAtStart: remNew };
+
+        // Update per-flight stored ETA
+        f.etaMinutes = adjustedETA;
+
+        // Keep the banner countdown aligned but MONOTONIC:
+        // Move the baseline downwards if we shortened the remaining time.
+        if (S.etaBaselineTime == null) S.etaBaselineTime = raceStart;
+        const delta = expectedRemaining - adjustedETA; // positive if we shortened
+        if (delta > 0) {
+          S.etaBaseline[which] = (S.etaBaseline[which] ?? originalETA) - delta;
+        }
+        // (If adjustedETA > expectedRemaining, we leave baseline as-is so UI never adds time.)
+
         changed = true;
       }
 
@@ -410,10 +428,7 @@ async function updateLivePositions() {
       if (updatedB) rebase('B', updatedB);
 
       if(changed) {
-        // Keep banner/card countdowns in sync with the latest ETA snapshot
-        S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
-        S.etaBaselineTime = now;
-
+        // NOTE: do NOT reset etaBaselineTime here; we keep it anchored at race start
         renderDealt();
         if(roomRef) {
           try { await window.firebaseUpdateDoc(roomRef, { dealt: S.dealt }); } 
@@ -1006,7 +1021,7 @@ copyBtn.addEventListener("click", copyInvite);
   img.onload = function() {
     const stage = byId("stage");
     const placeholder = stage?.querySelector(".stage-placeholder");
-if (placeholder) placeholder.remove();
+    if (placeholder) placeholder.remove();
     
     const actualImg = document.createElement("img");
     actualImg.src = "./sofawithkesslerandcajun.png";
