@@ -253,6 +253,7 @@ const S = {
 
 /* =================== Utilities =================== */
 const fmtMoney = (n)=>{ const sign = n >= 0 ? '+' : ''; return `${sign}${Math.abs(n).toLocaleString()}`; };
+const fmtUSD   = (n)=> `$${Math.round(n).toLocaleString()}`;
 const clamp = (v,lo,hi)=> Math.max(lo, Math.min(hi, v));
 const fmtClock = (minF)=>{
   const m = Math.max(0, Math.floor(minF));
@@ -311,6 +312,31 @@ async function fetchJSON(url, timeoutMs=9000){
   } finally {
     clearTimeout(t);
   }
+}
+
+/* =================== Kapow overlays =================== */
+function showKapow(title, opts={}){
+  const {
+    subtitle = "",
+    palette = ["#3EB7C2","#EAC54F","#E11D48","#34D399"], // teal / gold / red / green
+    ms = 1600
+  } = opts;
+
+  const root = document.createElement("div");
+  root.className = "kapow";
+  root.innerHTML = `
+  <svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <g class="burst">
+      <polygon fill="${palette[0]}" points="600,20 690,150 870,130 770,250 920,340 740,350 800,520 620,420 600,610 580,420 400,520 460,350 280,340 430,250 330,130 510,150"/>
+      <polygon fill="${palette[1]}" opacity=".95" points="600,90 665,185 800,175 720,255 820,320 700,325 740,460 620,390 600,510 580,390 460,460 500,325 380,320 480,255 400,175 535,185"/>
+      <polygon fill="${palette[2]}" opacity=".92" points="600,180 650,235 720,228 670,268 725,305 660,308 682,380 620,340 600,410 580,340 518,380 540,308 475,305 530,268 480,228 550,235"/>
+      <rect x="365" y="300" rx="20" ry="20" width="470" height="180" fill="${palette[3]}"/>
+      <text class="word" x="600" y="385" font-size="92" text-anchor="middle">${title}</text>
+      ${subtitle ? `<text class="sub" x="600" y="430" font-size="28" text-anchor="middle">${subtitle}</text>` : ""}
+    </g>
+  </svg>`;
+  document.body.appendChild(root);
+  setTimeout(()=> root.remove(), ms);
 }
 
 /* =================== Connection Status =================== */
@@ -572,17 +598,19 @@ function startRaceAnimation(){
 
         S._lastBannerUpdate = now;
 
-        // Landed handling
+        // Landed handling (+Kapow)
         if (!S._landed.A && remA <= 0) {
           S._landed.A = true;
           const [lat,lng] = destLatLng();
           if (S.maps.A) S.maps.A.plane.setLatLng([lat,lng]);
+          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
           if (S.pickedBy.A) showBubble(S.pickedBy.A, "Landed!", 1500);
         }
         if (!S._landed.B && remB <= 0) {
           S._landed.B = true;
           const [lat,lng] = destLatLng();
           if (S.maps.B) S.maps.B.plane.setLatLng([lat,lng]);
+          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
           if (S.pickedBy.B) showBubble(S.pickedBy.B, "Landed!", 1500);
         }
 
@@ -751,6 +779,7 @@ function updateHUD(){
   const strong = autoAirportPill?.querySelector("strong");
   if (strong) strong.textContent = S.airport || "—";
 
+  // (We still keep the celebratory text here; the big Kapow happens in resolve().)
   if(S.bank.K >= 5000 && S.bank.C <= -5000) setLog(`🎉 ${nameOf('K').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
   else if(S.bank.C >= 5000 && S.bank.K <= -5000) setLog(`🎉 ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
 }
@@ -957,6 +986,12 @@ async function resolve(){
   const bonusText  = isLongshotWin ? ` (longshot ×${(S.odds.mult||1).toFixed(2)})` : "";
   setLog(`Flight ${winner} wins! ${winnerName} takes $${payout}${bonusText} from ${loserName}.`);
 
+  // WINNER Kapow
+  showKapow("WINNER!", {
+    subtitle: `${winnerName} +${fmtUSD(payout)}${isLongshotWin ? " · Longshot!" : ""}`,
+    palette: ["#2563EB","#FBBF24","#EF4444","#22C55E"]
+  });
+
   try { showBubble(winnerSeat, "YES! Got it!", 1500); } catch {}
   try { showBubble(loserSeat, "Damn!", 1200); } catch {}
 
@@ -976,6 +1011,19 @@ async function resolve(){
   S.turn = (S.turn==="K"?"C":"K");
   S.pickedBy = {A:null, B:null};
   if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
+
+  // CHAMPION Kapow (match victory)
+  const kChampion = S.bank.K >= 5000 && S.bank.C <= -5000;
+  const cChampion = S.bank.C >= 5000 && S.bank.K <= -5000;
+  if (kChampion || cChampion){
+    const champSeat = kChampion ? "K" : "C";
+    const champName = nameOf(champSeat);
+    showKapow("CHAMPION!", {
+      subtitle: `${champName} wins the match`,
+      palette: ["#F59E0B","#FDE047","#F97316","#84CC16"],
+      ms: 2000
+    });
+  }
 
   if(roomRef){
     try {
