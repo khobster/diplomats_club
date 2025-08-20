@@ -351,28 +351,28 @@ function showKapow(title, opts={}){
 /* =================== Connection Status =================== */
 let connectionFailures = 0;
 function updateConnectionStatus(success) {
-  let el = document.getElementById('connection-status');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'connection-status';
-    el.style.cssText = `
-      position: fixed; top: 10px; right: 10px; padding: 6px 12px;
-      background: rgba(255,255,255,0.9); border-radius: 20px; font-size: 12px; font-weight: 700;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 1000;`;
-    el.innerHTML = ' Live';
-    document.body.appendChild(el);
-  }
-  if (success) {
-    connectionFailures = 0;
-    el.innerHTML = ' Live';
-    el.style.background = 'rgba(255,255,255,0.9)';
-  } else {
-    connectionFailures++;
-    if (connectionFailures >= 2) {
-      el.innerHTML = ' Interpolating';
-      el.style.background = 'rgba(255,240,240,0.9)';
-    }
-  }
+  let el = document.getElementById('connection-status');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'connection-status';
+    el.style.cssText = `
+      position: fixed; top: 10px; right: 10px; padding: 6px 12px;
+      background: rgba(255,255,255,0.9); border-radius: 20px; font-size: 12px; font-weight: 700;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 1000;`;
+    el.innerHTML = '🟢 Live';  // FIX: Add the green circle emoji back
+    document.body.appendChild(el);
+  }
+  if (success) {
+    connectionFailures = 0;
+    el.innerHTML = '🟢 Live';  // FIX: Add the green circle emoji back
+    el.style.background = 'rgba(255,255,255,0.9)';
+  } else {
+    connectionFailures++;
+    if (connectionFailures >= 2) {
+      el.innerHTML = '🟡 Interpolating';  // FIX: Add the yellow circle emoji back
+      el.style.background = 'rgba(255,240,240,0.9)';
+    }
+  }
 }
 
 /* =================== Live Flight Updates =================== */
