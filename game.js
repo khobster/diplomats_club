@@ -129,7 +129,7 @@ async function ensureRoom(){
     updateHUD();
     if(S.dealt) renderDealt();
 
-    // Detect a race-start transition (including join-mid-race)
+    // CRITICAL FIX: Detect when race starts (including on other player's screen)
     const raceJustStarted = S.racing && (!wasRacing || S.raceStartTime !== oldRaceStartTime);
     const choiceChanged = S.racing && S.chosen !== oldChosen;
     
@@ -141,7 +141,7 @@ async function ensureRoom(){
       S._leaderLockUntil = 0; 
       S._lastBannerUpdate = 0;
       S._landed = {A:false, B:false};
-      S._animationRunning = false; // ensure we can (re)start clean
+      S._animationRunning = false;
       
       // Initialize segments with current positions
       ['A','B'].forEach(k=>{
@@ -163,7 +163,7 @@ async function ensureRoom(){
       setLog(`${turnPlayer} picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${S.odds && S.odds[S.odds.long] ? ` (longshot pays ${S.odds.mult.toFixed(2)}×)` : ""}!`);
       startRaceAnimation();
     }else if(S.racing && wasRacing){
-      // Race continues – ensure the loop is alive
+      // Race continues, ensure animation is running
       if(!S._animationRunning){
         startRaceAnimation();
       }
@@ -327,7 +327,8 @@ function segPos(which, now=Date.now()){
   const seg = S.seg[which];
   const dst = destLatLng();
   if (!seg || !seg.startPos) return dst;
-  const { t } = segRemaining(which, now);
+  const { t, rem } = segRemaining(which, now);
+  if (t >= 0.999 || rem <= 0.01) return dst; // snap to runway
   return lerp(seg.startPos, dst, t);
 }
 
@@ -395,10 +396,6 @@ function updateConnectionStatus(success) {
     }
   }
 }
-function hideConnectionStatus(){
-  const el = document.getElementById('connection-status');
-  if (el) el.remove();
-}
 
 /* =================== Live Flight Updates =================== */
 async function updateLivePositions() {
@@ -462,10 +459,9 @@ async function updateLivePositions() {
         let apiETA = Number.isFinite(updated.etaMinutes) ? updated.etaMinutes : f.etaMinutes;
 
         // ---- CRITICAL: prevent "time being added" on updates ----
-        // Compute how much should remain based on the ORIGINAL race start
         const raceStart = S.raceStartTime || now;
         const elapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
-        const originalETA = S.etaBaseline[which] ?? f.etaMinutes; // baseline at start
+        const originalETA = S.etaBaseline[which] ?? f.etaMinutes;
         const expectedRemaining = Math.max(0, originalETA - elapsedSinceRaceStart);
 
         // Allow a tiny upward wiggle (e.g., vectoring), but clamp hard otherwise
@@ -476,19 +472,15 @@ async function updateLivePositions() {
         const start = [P[0], P[1]];
         const remNew = Math.max(0.01, adjustedETA);
 
-        // Set up the segment to continue from current position
         S.seg[which] = { startPos: start, startTime: now, etaAtStart: remNew };
-
-        // Update per-flight stored ETA
         f.etaMinutes = adjustedETA;
 
-        // Keep the banner countdown aligned but MONOTONIC
+        // Baseline monotonicity
         if (S.etaBaselineTime == null) S.etaBaselineTime = raceStart;
         const delta = expectedRemaining - adjustedETA; // positive if we shortened
         if (delta > 0) {
           S.etaBaseline[which] = (S.etaBaseline[which] ?? originalETA) - delta;
         }
-        // (If adjustedETA > expectedRemaining, we leave baseline as-is so UI never adds time.)
 
         changed = true;
       }
@@ -497,9 +489,7 @@ async function updateLivePositions() {
       if (updatedB) rebase('B', updatedB);
 
       if(changed) {
-        // NOTE: do NOT reset etaBaselineTime here; we keep it anchored at race start
         renderDealt();
-        // No Firestore writes here to avoid feedback loops
       }
       
       updateConnectionStatus(true);
@@ -524,27 +514,25 @@ async function updateLivePositions() {
 /* =================== Race Animation with Live Updates =================== */
 function startRaceAnimation(){
   if(!S.dealt || !S.racing) return;
-
-  // Prevent duplicate loops
-  if (S._animationRunning) {
-    console.log("[DL] Animation already running, skip");
+  
+  // Prevent duplicate animations
+  if(S._animationRunning) {
+    console.log("[DL] Animation already running, skipping duplicate start");
     return;
   }
   S._animationRunning = true;
 
-  // show status pill immediately
-  updateConnectionStatus(true);
-
   const {A,B} = S.dealt;
   let raceMs;
-  if (REAL_TIME_RACING){
+
+  if(REAL_TIME_RACING){
     raceMs = Math.min(A.etaMinutes, B.etaMinutes) * 60 * 1000;
     setLog(`LIVE RACE at ${S.airport}! Updates every 3 min. First to land wins!`);
-  } else {
+  }else{
     raceMs = 6500;
   }
 
-  // Ensure anchors exist (covers join-mid-race)
+  // Ensure anchors exist (e.g., joined mid-race)
   ['A','B'].forEach(k=>{
     if (!S.seg[k]?.startPos) {
       const f = S.dealt[k];
@@ -562,141 +550,155 @@ function startRaceAnimation(){
   if (!S.raceStartTime) S.raceStartTime = Date.now();
   S.raceDuration = raceMs;
 
-  // Initialize monotonic ETA baselines once
   if (!S.etaBaselineTime) {
     S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
     S.etaBaselineTime = S.raceStartTime;
-    S._stableLeader = null;
-    S._leaderLockUntil = 0;
-    S._lastBannerUpdate = 0;
-    S._landed = {A:false, B:false};
+    S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
   }
 
-  // Clear old timers (if any)
-  if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
-  if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
-
-  // First fetch after 60s, then every 3m
-  S._liveTimeoutId = setTimeout(()=>{
+  // Clear any existing timers to prevent duplicates
+  if (S._liveTimeoutId) { 
+    clearTimeout(S._liveTimeoutId); 
+    S._liveTimeoutId = null; 
+  }
+  if (S._liveIntervalId) { 
+    clearInterval(S._liveIntervalId); 
+    S._liveIntervalId = null;
+  }
+  
+  // Set up new timers
+  S._liveTimeoutId = setTimeout(()=>{ 
     S._liveTimeoutId = null;
-    if (S.racing) updateLivePositions();
+    if(S.racing) updateLivePositions(); 
   }, FIRST_PING_DELAY);
-
+  
   S.nextLiveUpdateAt = (S.lastLiveUpdateAt || S.raceStartTime) + FIRST_PING_DELAY;
-
-  S._liveIntervalId = setInterval(()=>{
-    if (S.racing) updateLivePositions();
+  S._liveIntervalId = setInterval(()=>{ 
+    if(S.racing) updateLivePositions(); 
   }, LIVE_UPDATE_INTERVAL);
 
   const timerEl = byId("log");
-
   (function step(){
-    if (!S.racing){
-      // stop loop + timers
+    if(!S.racing){ 
+      S._animationRunning = false;  // Mark animation as stopped
       if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
       if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
-      S._animationRunning = false;
-      hideConnectionStatus();
-      return;
+      return; 
     }
 
     const now = Date.now();
 
-    // Progress bars from segment interpolation
+    // Progress bars via segments
     const { t: tA, rem: remSegA } = segRemaining('A', now);
     const { t: tB, rem: remSegB } = segRemaining('B', now);
-    barA.style.width = (tA*100).toFixed(1) + "%";
-    barB.style.width = (tB*100).toFixed(1) + "%";
+    barA.style.width = (tA*100).toFixed(1)+"%";
+    barB.style.width = (tB*100).toFixed(1)+"%";
 
-    // Plane positions + lines
-    if (S.maps.A && S.maps.B){
-      const pA = segPos('A', now);
-      const pB = segPos('B', now);
-      S.maps.A.plane.setLatLng(pA);
-      S.maps.B.plane.setLatLng(pB);
+    // Plane positions
+    if(S.maps.A && S.maps.B){
       const dst = destLatLng();
-      S.maps.A.line.setLatLngs([pA, dst]);
-      S.maps.B.line.setLatLngs([pB, dst]);
+      if (!S._landed.A) {
+        const pA = segPos('A', now);
+        S.maps.A.plane.setLatLng(pA);
+        S.maps.A.line.setLatLngs([pA, dst]);
+      }
+      if (!S._landed.B) {
+        const pB = segPos('B', now);
+        S.maps.B.plane.setLatLng(pB);
+        S.maps.B.line.setLatLngs([pB, dst]);
+      }
     }
 
-    // Banner + per-card ETAs at 1Hz
-    if (REAL_TIME_RACING && now - S._lastBannerUpdate >= 1000){
-      const baseTime = S.etaBaselineTime || S.raceStartTime || now;
-      const elapsedMin = Math.max(0, (now - baseTime) / 60000);
+    // Banner + card ETA/miles sync (1 Hz)
+    if (REAL_TIME_RACING && S.racing) {
+      if (now - S._lastBannerUpdate >= 1000) {
+        const baseTime = S.etaBaselineTime || S.raceStartTime || now;
+        const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
 
-      const remA = Math.max(0, (S.etaBaseline.A ?? remSegA) - elapsedMin);
-      const remB = Math.max(0, (S.etaBaseline.B ?? remSegB) - elapsedMin);
+        const remA = Math.max(0, (S.etaBaseline.A ?? remSegA) - elapsedMinSinceBase);
+        const remB = Math.max(0, (S.etaBaseline.B ?? remSegB) - elapsedMinSinceBase);
 
-      if (S.chosen) {
-        const [dlat,dlng] = destLatLng();
-        const [alat,alng] = segPos('A', now);
-        const [blat,blng] = segPos('B', now);
-
-        if (remA > 0) {
-          etaA.dataset.mi = milesBetween(alat,alng,dlat,dlng);
-          etaA.textContent = `ETA ${fmtClock(remA)} — ~${etaA.dataset.mi} mi`;
-        } else {
-          etaA.textContent = `Landed`;
+        if (S.chosen) {
+          const [dlat,dlng] = destLatLng();
+          const [alat,alng] = segPos('A', now);
+          const [blat,blng] = segPos('B', now);
+          
+          if (remA > 0) {
+            etaA.dataset.mi = milesBetween(alat,alng,dlat,dlng);
+            etaA.textContent = `ETA ${fmtClock(remA)} — ~${etaA.dataset.mi} mi`;
+          } else {
+            etaA.textContent = `Landed`;
+          }
+          
+          if (remB > 0) {
+            etaB.dataset.mi = milesBetween(blat,blng,dlat,dlng);
+            etaB.textContent = `ETA ${fmtClock(remB)} — ~${etaB.dataset.mi} mi`;
+          } else {
+            etaB.textContent = `Landed`;
+          }
         }
 
-        if (remB > 0) {
-          etaB.dataset.mi = milesBetween(blat,blng,dlat,dlng);
-          etaB.textContent = `ETA ${fmtClock(remB)} — ~${etaB.dataset.mi} mi`;
-        } else {
-          etaB.textContent = `Landed`;
+        // Stabilized leader
+        const rawLeader = remA < remB ? 'A' : 'B';
+        const HYSTERESIS_MS = 2000;
+        if (S._stableLeader == null) {
+          S._stableLeader = rawLeader;
+          S._leaderLockUntil = now + HYSTERESIS_MS;
+        } else if (rawLeader !== S._stableLeader && now >= S._leaderLockUntil) {
+          S._stableLeader = rawLeader;
+          S._leaderLockUntil = now + HYSTERESIS_MS;
         }
-      }
 
-      // Stabilize leader to avoid flicker
-      const rawLeader = remA < remB ? 'A' : 'B';
-      const HYSTERESIS_MS = 2000;
-      if (S._stableLeader == null) {
-        S._stableLeader = rawLeader;
-        S._leaderLockUntil = now + HYSTERESIS_MS;
-      } else if (rawLeader !== S._stableLeader && now >= S._leaderLockUntil) {
-        S._stableLeader = rawLeader;
-        S._leaderLockUntil = now + HYSTERESIS_MS;
-      }
+        const lead = S._stableLeader;
+        const lag  = lead === 'A' ? 'B' : 'A';
+        const leadRem = lead === 'A' ? remA : remB;
+        const lagRem  = lead === 'A' ? remB : remA;
+        const gap = Math.max(0, lagRem - leadRem);
 
-      const lead = S._stableLeader;
-      const lag  = lead === 'A' ? 'B' : 'A';
-      const leadRem = lead === 'A' ? remA : remB;
-      const lagRem  = lead === 'A' ? remB : remA;
-      const gap = Math.max(0, lagRem - leadRem);
+        const nextAt = S.nextLiveUpdateAt || (S.raceStartTime + FIRST_PING_DELAY);
+        const msToNext = Math.max(0, nextAt - now);
+        const secToNext = Math.ceil(msToNext/1000);
+        const mm = Math.floor(secToNext/60), ss = (secToNext%60).toString().padStart(2,'0');
 
-      const nextAt = S.nextLiveUpdateAt || (S.raceStartTime + FIRST_PING_DELAY);
-      const msToNext = Math.max(0, nextAt - now);
-      const secToNext = Math.ceil(msToNext / 1000);
-      const mm = Math.floor(secToNext/60), ss = String(secToNext%60).padStart(2,'0');
+        timerEl.textContent =
+          `LIVE RACE @ ${S.airport} — Flight ${lead} leads — ETA ${fmtClock(leadRem)} ` +
+          `(${lag} ${fmtClock(lagRem)}, Δ${fmtClock(gap)}) · next update in ${mm}:${ss}`;
 
-      timerEl.textContent =
-        `LIVE RACE @ ${S.airport} — Flight ${lead} leads — ETA ${fmtClock(leadRem)} ` +
-        `(${lag} ${fmtClock(lagRem)}, Δ${fmtClock(gap)}) · next update in ${mm}:${ss}`;
+        S._lastBannerUpdate = now;
 
-      S._lastBannerUpdate = now;
+        // Landed handling (+Kapow)
+        if (!S._landed.A && remA <= 0) {
+          S._landed.A = true;
+          const [lat,lng] = destLatLng();
+          if (S.maps.A) {
+            S.maps.A.plane.setLatLng([lat,lng]);
+            S.maps.A.line.setLatLngs([[lat,lng],[lat,lng]]);
+          }
+          S.seg.A.startPos = [lat,lng];
+          S.seg.A.startTime = now;
+          S.seg.A.etaAtStart = 0;
+          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
+          if (S.pickedBy.A) showBubble(S.pickedBy.A, "Landed!", 1500);
+        }
+        if (!S._landed.B && remB <= 0) {
+          S._landed.B = true;
+          const [lat,lng] = destLatLng();
+          if (S.maps.B) {
+            S.maps.B.plane.setLatLng([lat,lng]);
+            S.maps.B.line.setLatLngs([[lat,lng],[lat,lng]]);
+          }
+          S.seg.B.startPos = [lat,lng];
+          S.seg.B.startTime = now;
+          S.seg.B.etaAtStart = 0;
+          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
+          if (S.pickedBy.B) showBubble(S.pickedBy.B, "Landed!", 1500);
+        }
 
-      // Landed effects (one-time)
-      if (!S._landed.A && remA <= 0) {
-        S._landed.A = true;
-        const [lat,lng] = destLatLng();
-        if (S.maps.A) S.maps.A.plane.setLatLng([lat,lng]);
-        showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
-        if (S.pickedBy.A) showBubble(S.pickedBy.A, "Landed!", 1500);
-      }
-      if (!S._landed.B && remB <= 0) {
-        S._landed.B = true;
-        const [lat,lng] = destLatLng();
-        if (S.maps.B) S.maps.B.plane.setLatLng([lat,lng]);
-        showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
-        if (S.pickedBy.B) showBubble(S.pickedBy.B, "Landed!", 1500);
-      }
-
-      // Finish condition — only the picker resolves, the other side waits for Firestore
-      if (remA <= 0 || remB <= 0) {
-        if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
-        if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
-        if (seat === S.turn && !S._resolving) resolve();
-        // keep loop alive until Firestore flips S.racing=false
+        // When one lands, resolve on the picker — keep the loop alive until Firestore flips S.racing=false
+        if ((remA <= 0 || remB <= 0) && seat === S.turn && !S._resolving) {
+          console.log("[DL] Race finished, resolving...");
+          resolve();
+        }
       }
     }
 
@@ -763,7 +765,7 @@ function ensureMap(which){
 function fitAndRender(which, flight, destPos){
   const M = ensureMap(which); if(!M) return 1;
   let pos;
-  if(flight?.pos?.lat != null && (flight.pos.lng ?? flight.pos.lon) != null){ 
+  if(flight.pos?.lat != null && (flight.pos.lng ?? flight.pos.lon) != null){ 
     const lng = flight.pos.lng ?? flight.pos.lon; 
     pos = [flight.pos.lat, lng]; 
   } else { 
@@ -774,7 +776,7 @@ function fitAndRender(which, flight, destPos){
   if(destPos?.lat != null && (destPos.lng ?? destPos.lon) != null){ 
     const lng = destPos.lng ?? destPos.lon; 
     dst=[destPos.lat, lng]; 
-  } else if (AIRPORTS[flight?.dest]){ 
+  } else if (AIRPORTS[flight.dest]){ 
     dst = AIRPORTS[flight.dest]; 
   } else { 
     dst = [40.6413,-73.7781]; 
@@ -791,11 +793,11 @@ function fitAndRender(which, flight, destPos){
 }
 
 function guessPos(f){
-  if(f?.pos?.lat != null && (f.pos.lng ?? f.pos.lon) != null){ 
+  if(f.pos?.lat != null && (f.pos.lng ?? f.pos.lon) != null){ 
     const lng = f.pos.lng ?? f.pos.lon; 
     return [f.pos.lat, lng]; 
   }
-  const d = AIRPORTS[f?.dest] || [40.6413,-73.7781];
+  const d = AIRPORTS[f.dest] || [40.6413,-73.7781];
   const offsetLat = d[0] + (Math.random()-0.5)*0.6; 
   const offsetLng = d[1] + (Math.random()-0.5)*0.6; 
   return [offsetLat, offsetLng];
@@ -854,6 +856,7 @@ function updateHUD(){
   const strong = autoAirportPill?.querySelector("strong");
   if (strong) strong.textContent = S.airport || "—";
 
+  // (We still keep the celebratory text here; the big Kapow happens in resolve().)
   if(S.bank.K >= 5000 && S.bank.C <= -5000) setLog(` ${nameOf('K').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
   else if(S.bank.C >= 5000 && S.bank.K <= -5000) setLog(` ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
 }
@@ -945,7 +948,7 @@ async function deal(){
 
   S._resolving = false;
   S._landed = {A:false, B:false};
-  S._animationRunning = false;
+  S._animationRunning = false;  // Reset animation flag
 
   ['A','B'].forEach(k=>{
     const f = S.dealt[k];
@@ -999,8 +1002,6 @@ async function start(choice){
   S.etaBaseline = { A: S.dealt.A.etaMinutes, B: S.dealt.B.etaMinutes };
   S.etaBaselineTime = S.raceStartTime;
   S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
-  S._landed = {A:false, B:false};
-  S._animationRunning = false;
 
   S.pickedBy.A = choice === 'A' ? S.turn : (S.turn === "K" ? "C" : "K");
   S.pickedBy.B = choice === 'B' ? S.turn : (S.turn === "K" ? "C" : "K");
@@ -1062,7 +1063,7 @@ async function resolve(){
   const winnerName = nameOf(winnerSeat);
   const loserName  = nameOf(loserSeat);
   const bonusText  = isLongshotWin ? ` (longshot ×${(S.odds.mult||1).toFixed(2)})` : "";
-  setLog(`Flight ${winner} wins! ${winnerName} takes $${payout}${bonusText} from ${loserName}.`);
+  setLog(`Flight ${winner} wins! ${winnerName} takes ${fmtUSD(payout)}${bonusText} from ${loserName}.`);
 
   // WINNER Kapow
   showKapow("WINNER!", {
@@ -1090,10 +1091,7 @@ async function resolve(){
   S.pickedBy = {A:null, B:null};
   if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
   if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
-
-  // stop animation status pill
-  S._animationRunning = false;
-  hideConnectionStatus();
+  S._animationRunning = false; // ensure next race can start
 
   // CHAMPION Kapow (match victory)
   const kChampion = S.bank.K >= 5000 && S.bank.C <= -5000;
@@ -1146,7 +1144,7 @@ copyBtn.addEventListener("click", copyInvite);
   setSeatLabel(seat);
   updateHUD();
   startBlinking();
-  
+
   // Load sofa art if present
   const img = new Image();
   img.onload = function() {
@@ -1164,9 +1162,9 @@ copyBtn.addEventListener("click", copyInvite);
   };
   img.onerror = function() { console.warn("[DL] Could not load sofa image, using placeholder"); };
   img.src = "./sofawithkesslerandcajun.png";
-  
+
   await initFirebase();
   await ensureRoom();
-  
+
   setLog("Welcome to the Diplomat's Lounge. Deal flights to start.");
 })();
