@@ -329,7 +329,6 @@ function segPos(which, now=Date.now()){
   const dst = destLatLng();
   if (!seg || !seg.startPos) return dst;
   const { t, rem } = segRemaining(which, now);
-  // When done, snap to exact destination for consistency
   if (t >= 0.999 || rem <= 0.01) return dst;
   return lerp(seg.startPos, dst, t);
 }
@@ -351,7 +350,7 @@ async function fetchJSON(url, timeoutMs=9000){
 function showKapow(title, opts={}){
   const {
     subtitle = "",
-    palette = ["#3EB7C2","#EAC54F","#E11D48","#34D399"], // teal / gold / red / green
+    palette = ["#3EB7C2","#EAC54F","#E11D48","#34D399"],
     ms = 1600
   } = opts;
 
@@ -613,13 +612,16 @@ function startRaceAnimation(){
         const distA = milesBetween(alat, alng, dlat, dlng);
         const distB = milesBetween(blat, blng, dlat, dlng);
 
-        // Update card text (no “Landed” unless truly landed)
+        // Update card text (show "Landed" only when truly landed)
         if (S.chosen) {
-          etaA.textContent = (segA.t >= 0.999 || distA <= LANDING_MI_THRESHOLD)
+          const landedA_and = (segA.t >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
+          const landedB_and = (segB.t >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
+          
+          etaA.textContent = landedA_and
             ? "Landed"
             : `ETA ${fmtClock(showA)} — ~${distA} mi`;
 
-          etaB.textContent = (segB.t >= 0.999 || distB <= LANDING_MI_THRESHOLD)
+          etaB.textContent = landedB_and
             ? "Landed"
             : `ETA ${fmtClock(showB)} — ~${distB} mi`;
         }
@@ -651,9 +653,9 @@ function startRaceAnimation(){
 
         S._lastBannerUpdate = now;
 
-        // Landing detection: only when dot is at/near the destination
-        const landedA = (segA.t >= 0.999) || (distA <= LANDING_MI_THRESHOLD);
-        const landedB = (segB.t >= 0.999) || (distB <= LANDING_MI_THRESHOLD);
+        // Landing detection: ONLY when interpolation finished AND within threshold
+        const landedA = (segA.t >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
+        const landedB = (segB.t >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
 
         if (!S._landed.A && landedA) {
           S._landed.A = true;
@@ -661,6 +663,11 @@ function startRaceAnimation(){
             S.maps.A.plane.setLatLng([dlat, dlng]);
             S.maps.A.line.setLatLngs([[dlat, dlng], [dlat, dlng]]);
           }
+          S.seg.A.startPos = [dlat, dlng];
+          S.seg.A.startTime = now;
+          S.seg.A.etaAtStart = 0;
+          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
+          if (S.pickedBy.A) showBubble(S.pickedBy.A, "Landed!", 1500);
         }
         if (!S._landed.B && landedB) {
           S._landed.B = true;
@@ -668,14 +675,15 @@ function startRaceAnimation(){
             S.maps.B.plane.setLatLng([dlat, dlng]);
             S.maps.B.line.setLatLngs([[dlat, dlng], [dlat, dlng]]);
           }
+          S.seg.B.startPos = [dlat, dlng];
+          S.seg.B.startTime = now;
+          S.seg.B.etaAtStart = 0;
+          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
+          if (S.pickedBy.B) showBubble(S.pickedBy.B, "Landed!", 1500);
         }
 
         // Finish only when someone truly landed
         if (landedA || landedB) {
-          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
-          const who = landedA && !landedB ? 'A' : landedB && !landedA ? 'B' : null;
-          if (who && S.pickedBy[who]) showBubble(S.pickedBy[who], "Landed!", 1500);
-
           if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
           if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
           if (seat === S.turn && !S._resolving) resolve();
@@ -992,7 +1000,7 @@ async function start(choice){
 
   if(choice === longFlight){ showBubble(S.turn, `Longshot pays ${mult.toFixed(2)}×`, 1600); }
 
-  setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${choice===longFlight ? ` (longshot pays ${mult.toFixed(2)}×)` : ""}!`);
+  setLog(`${turnPlayer} picks Flight ${myChoice}! ${oppPlayer} gets Flight ${oppChoice}. Racing for ${S.bet}${choice===longFlight ? ` (longshot pays ${mult.toFixed(2)}×)` : ""}!`);
 
   if(roomRef){
     try {
@@ -1054,7 +1062,7 @@ async function resolve(){
   const winnerName = nameOf(winnerSeat);
   const loserName  = nameOf(loserSeat);
   const bonusText  = isLongshotWin ? ` (longshot ×${(S.odds.mult||1).toFixed(2)})` : "";
-  setLog(`Flight ${winner} wins! ${winnerName} takes $${payout}${bonusText} from ${loserName}.`);
+  setLog(`Flight ${winner} wins! ${winnerName} takes ${payout}${bonusText} from ${loserName}.`);
 
   // WINNER Kapow
   showKapow("WINNER!", {
