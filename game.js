@@ -129,7 +129,7 @@ async function ensureRoom(){
     updateHUD();
     if(S.dealt) renderDealt();
 
-    // CRITICAL FIX: Detect when race starts (including on other player's screen)
+    // Detect cross-client race starts / choice flips
     const raceJustStarted = S.racing && (!wasRacing || S.raceStartTime !== oldRaceStartTime);
     const choiceChanged = S.racing && S.chosen !== oldChosen;
     
@@ -142,10 +142,10 @@ async function ensureRoom(){
       S._lastBannerUpdate = 0;
       S._landed = {A:false, B:false};
       S._animationRunning = false;
-      
+
       // Initialize segments with current positions
       ['A','B'].forEach(k=>{
-        const f = S.dealt?.[k];
+        const f = S.dealt[k];
         if(f){
           let startPos;
           if (f?.pos?.lat != null && (f.pos.lng ?? f.pos.lon) != null){
@@ -163,7 +163,7 @@ async function ensureRoom(){
       setLog(`${turnPlayer} picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${S.odds && S.odds[S.odds.long] ? ` (longshot pays ${S.odds.mult.toFixed(2)}×)` : ""}!`);
       startRaceAnimation();
     }else if(S.racing && wasRacing){
-      // Race continues, ensure animation is running
+      // Ensure animation is running, but don't duplicate
       if(!S._animationRunning){
         startRaceAnimation();
       }
@@ -228,6 +228,7 @@ const REAL_TIME_RACING = true;
 const FIRST_PING_DELAY = 60 * 1000;         // 60s
 const LIVE_UPDATE_INTERVAL = 3 * 60 * 1000; // 3 minutes
 const MIN_RACE_MINUTES = 12;                // target race length
+const LANDING_MI_THRESHOLD = 3;             // counts as landed at ≤ 3 miles
 const AIRPORTS = {
   JFK:[40.6413,-73.7781], EWR:[40.6895,-74.1745], LGA:[40.7769,-73.8740],
   YYZ:[43.6777,-79.6248], YUL:[45.4706,-73.7408], YVR:[49.1951,-123.1779],
@@ -328,7 +329,8 @@ function segPos(which, now=Date.now()){
   const dst = destLatLng();
   if (!seg || !seg.startPos) return dst;
   const { t, rem } = segRemaining(which, now);
-  if (t >= 0.999 || rem <= 0.01) return dst; // snap to runway
+  // When done, snap to exact destination for consistency
+  if (t >= 0.999 || rem <= 0.01) return dst;
   return lerp(seg.startPos, dst, t);
 }
 
@@ -400,12 +402,7 @@ function updateConnectionStatus(success) {
 /* =================== Live Flight Updates =================== */
 async function updateLivePositions() {
   if(!S.racing || !S.dealt || !S.live || !S.airport) return;
-  
-  // Prevent overlapping fetches
-  if(S._liveFetchInFlight) {
-    console.log("[DL] Live fetch already in flight, skipping");
-    return;
-  }
+  if(S._liveFetchInFlight) { console.log("[DL] Live fetch already in flight, skipping"); return; }
 
   S._liveFetchInFlight = true;
   S.lastLiveUpdateAt = Date.now();
@@ -414,11 +411,8 @@ async function updateLivePositions() {
   const ida = S.dealt?.A?.icao24 || "";
   const idb = S.dealt?.B?.icao24 || "";
   const hex = /^[0-9a-f]{6}$/i;
-  const trackList = [ida, idb].filter(id => id && hex.test(id)); // refuse sim/non-hex
-  if (trackList.length === 0) {
-    S._liveFetchInFlight = false;
-    return;
-  }
+  const trackList = [ida, idb].filter(id => id && hex.test(id));
+  if (trackList.length === 0) { S._liveFetchInFlight = false; return; }
 
   let attempts = 0;
   const maxAttempts = 3;
@@ -440,7 +434,6 @@ async function updateLivePositions() {
         console.log("[DL] Tracked results:", { foundA: !!updatedA, foundB: !!updatedB });
       }
 
-      const now = Date.now();
       let changed = false;
 
       // continuity-preserving rebase that keeps CURRENT SCREEN POSITION constant
@@ -458,24 +451,21 @@ async function updateLivePositions() {
         // New ETA from API (minutes from *now* to landing)
         let apiETA = Number.isFinite(updated.etaMinutes) ? updated.etaMinutes : f.etaMinutes;
 
-        // ---- CRITICAL: prevent "time being added" on updates ----
+        // Prevent "time being added": clamp to baseline-minus-elapsed (+tiny wiggle)
         const raceStart = S.raceStartTime || now;
         const elapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
-        const originalETA = S.etaBaseline[which] ?? f.etaMinutes;
+        const originalETA = S.etaBaseline[which] ?? f.etaMinutes; // baseline at start
         const expectedRemaining = Math.max(0, originalETA - elapsedSinceRaceStart);
-
-        // Allow a tiny upward wiggle (e.g., vectoring), but clamp hard otherwise
-        const MAX_UP_MIN = 2; // minutes
+        const MAX_UP_MIN = 2;
         const adjustedETA = Math.min(apiETA, expectedRemaining + MAX_UP_MIN);
 
-        // Keep the display at P; start from P; fly to dest with adjusted ETA
-        const start = [P[0], P[1]];
-        const remNew = Math.max(0.01, adjustedETA);
+        // Re-anchor segment at current on-screen P with adjusted remaining ETA
+        S.seg[which] = { startPos: [P[0], P[1]], startTime: now, etaAtStart: Math.max(0.01, adjustedETA) };
 
-        S.seg[which] = { startPos: start, startTime: now, etaAtStart: remNew };
+        // Update stored ETA
         f.etaMinutes = adjustedETA;
 
-        // Baseline monotonicity
+        // Move baseline only downward so banner clock can't add time
         if (S.etaBaselineTime == null) S.etaBaselineTime = raceStart;
         const delta = expectedRemaining - adjustedETA; // positive if we shortened
         if (delta > 0) {
@@ -514,12 +504,7 @@ async function updateLivePositions() {
 /* =================== Race Animation with Live Updates =================== */
 function startRaceAnimation(){
   if(!S.dealt || !S.racing) return;
-  
-  // Prevent duplicate animations
-  if(S._animationRunning) {
-    console.log("[DL] Animation already running, skipping duplicate start");
-    return;
-  }
+  if(S._animationRunning) { console.log("[DL] Animation already running, skipping duplicate start"); return; }
   S._animationRunning = true;
 
   const {A,B} = S.dealt;
@@ -557,14 +542,8 @@ function startRaceAnimation(){
   }
 
   // Clear any existing timers to prevent duplicates
-  if (S._liveTimeoutId) { 
-    clearTimeout(S._liveTimeoutId); 
-    S._liveTimeoutId = null; 
-  }
-  if (S._liveIntervalId) { 
-    clearInterval(S._liveIntervalId); 
-    S._liveIntervalId = null;
-  }
+  if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
+  if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
   
   // Set up new timers
   S._liveTimeoutId = setTimeout(()=>{ 
@@ -580,7 +559,7 @@ function startRaceAnimation(){
   const timerEl = byId("log");
   (function step(){
     if(!S.racing){ 
-      S._animationRunning = false;  // Mark animation as stopped
+      S._animationRunning = false;
       if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
       if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
       return; 
@@ -594,7 +573,7 @@ function startRaceAnimation(){
     barA.style.width = (tA*100).toFixed(1)+"%";
     barB.style.width = (tB*100).toFixed(1)+"%";
 
-    // Plane positions
+    // Plane positions (don't move already-landed markers)
     if(S.maps.A && S.maps.B){
       const dst = destLatLng();
       if (!S._landed.A) {
@@ -609,37 +588,44 @@ function startRaceAnimation(){
       }
     }
 
-    // Banner + card ETA/miles sync (1 Hz)
+    // --- 1 Hz banner + ETA/miles (tied to segment progress) ---
     if (REAL_TIME_RACING && S.racing) {
       if (now - S._lastBannerUpdate >= 1000) {
         const baseTime = S.etaBaselineTime || S.raceStartTime || now;
         const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
 
-        const remA = Math.max(0, (S.etaBaseline.A ?? remSegA) - elapsedMinSinceBase);
-        const remB = Math.max(0, (S.etaBaseline.B ?? remSegB) - elapsedMinSinceBase);
+        // Baseline countdown from live clock
+        const clockA = Math.max(0, (S.etaBaseline.A ?? 0) - elapsedMinSinceBase);
+        const clockB = Math.max(0, (S.etaBaseline.B ?? 0) - elapsedMinSinceBase);
 
+        // Segment-based remaining from the animation anchors
+        const segA = segRemaining('A', now);
+        const segB = segRemaining('B', now);
+
+        // What we *show* = can't beat the dot's progress
+        const showA = Math.max(segA.rem, clockA);
+        const showB = Math.max(segB.rem, clockB);
+
+        // Current positions and distances to dest
+        const [dlat, dlng] = destLatLng();
+        const [alat, alng] = segPos('A', now);
+        const [blat, blng] = segPos('B', now);
+        const distA = milesBetween(alat, alng, dlat, dlng);
+        const distB = milesBetween(blat, blng, dlat, dlng);
+
+        // Update card text (no “Landed” unless truly landed)
         if (S.chosen) {
-          const [dlat,dlng] = destLatLng();
-          const [alat,alng] = segPos('A', now);
-          const [blat,blng] = segPos('B', now);
-          
-          if (remA > 0) {
-            etaA.dataset.mi = milesBetween(alat,alng,dlat,dlng);
-            etaA.textContent = `ETA ${fmtClock(remA)} — ~${etaA.dataset.mi} mi`;
-          } else {
-            etaA.textContent = `Landed`;
-          }
-          
-          if (remB > 0) {
-            etaB.dataset.mi = milesBetween(blat,blng,dlat,dlng);
-            etaB.textContent = `ETA ${fmtClock(remB)} — ~${etaB.dataset.mi} mi`;
-          } else {
-            etaB.textContent = `Landed`;
-          }
+          etaA.textContent = (segA.t >= 0.999 || distA <= LANDING_MI_THRESHOLD)
+            ? "Landed"
+            : `ETA ${fmtClock(showA)} — ~${distA} mi`;
+
+          etaB.textContent = (segB.t >= 0.999 || distB <= LANDING_MI_THRESHOLD)
+            ? "Landed"
+            : `ETA ${fmtClock(showB)} — ~${distB} mi`;
         }
 
-        // Stabilized leader
-        const rawLeader = remA < remB ? 'A' : 'B';
+        // Stabilized leader based on displayed remaining
+        const rawLeader = showA < showB ? 'A' : 'B';
         const HYSTERESIS_MS = 2000;
         if (S._stableLeader == null) {
           S._stableLeader = rawLeader;
@@ -651,14 +637,13 @@ function startRaceAnimation(){
 
         const lead = S._stableLeader;
         const lag  = lead === 'A' ? 'B' : 'A';
-        const leadRem = lead === 'A' ? remA : remB;
-        const lagRem  = lead === 'A' ? remB : remA;
+        const leadRem = lead === 'A' ? showA : showB;
+        const lagRem  = lead === 'A' ? showB : showA;
         const gap = Math.max(0, lagRem - leadRem);
 
         const nextAt = S.nextLiveUpdateAt || (S.raceStartTime + FIRST_PING_DELAY);
-        const msToNext = Math.max(0, nextAt - now);
-        const secToNext = Math.ceil(msToNext/1000);
-        const mm = Math.floor(secToNext/60), ss = (secToNext%60).toString().padStart(2,'0');
+        const secToNext = Math.ceil(Math.max(0, nextAt - now) / 1000);
+        const mm = Math.floor(secToNext/60), ss = String(secToNext%60).padStart(2,'0');
 
         timerEl.textContent =
           `LIVE RACE @ ${S.airport} — Flight ${lead} leads — ETA ${fmtClock(leadRem)} ` +
@@ -666,38 +651,35 @@ function startRaceAnimation(){
 
         S._lastBannerUpdate = now;
 
-        // Landed handling (+Kapow)
-        if (!S._landed.A && remA <= 0) {
+        // Landing detection: only when dot is at/near the destination
+        const landedA = (segA.t >= 0.999) || (distA <= LANDING_MI_THRESHOLD);
+        const landedB = (segB.t >= 0.999) || (distB <= LANDING_MI_THRESHOLD);
+
+        if (!S._landed.A && landedA) {
           S._landed.A = true;
-          const [lat,lng] = destLatLng();
           if (S.maps.A) {
-            S.maps.A.plane.setLatLng([lat,lng]);
-            S.maps.A.line.setLatLngs([[lat,lng],[lat,lng]]);
+            S.maps.A.plane.setLatLng([dlat, dlng]);
+            S.maps.A.line.setLatLngs([[dlat, dlng], [dlat, dlng]]);
           }
-          S.seg.A.startPos = [lat,lng];
-          S.seg.A.startTime = now;
-          S.seg.A.etaAtStart = 0;
-          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
-          if (S.pickedBy.A) showBubble(S.pickedBy.A, "Landed!", 1500);
         }
-        if (!S._landed.B && remB <= 0) {
+        if (!S._landed.B && landedB) {
           S._landed.B = true;
-          const [lat,lng] = destLatLng();
           if (S.maps.B) {
-            S.maps.B.plane.setLatLng([lat,lng]);
-            S.maps.B.line.setLatLngs([[lat,lng],[lat,lng]]);
+            S.maps.B.plane.setLatLng([dlat, dlng]);
+            S.maps.B.line.setLatLngs([[dlat, dlng], [dlat, dlng]]);
           }
-          S.seg.B.startPos = [lat,lng];
-          S.seg.B.startTime = now;
-          S.seg.B.etaAtStart = 0;
-          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
-          if (S.pickedBy.B) showBubble(S.pickedBy.B, "Landed!", 1500);
         }
 
-        // When one lands, resolve on the picker — keep the loop alive until Firestore flips S.racing=false
-        if ((remA <= 0 || remB <= 0) && seat === S.turn && !S._resolving) {
-          console.log("[DL] Race finished, resolving...");
-          resolve();
+        // Finish only when someone truly landed
+        if (landedA || landedB) {
+          showKapow("LANDED", { palette: ["#40BAC6","#F2CF59","#EF2B59","#34D399"] });
+          const who = landedA && !landedB ? 'A' : landedB && !landedA ? 'B' : null;
+          if (who && S.pickedBy[who]) showBubble(S.pickedBy[who], "Landed!", 1500);
+
+          if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
+          if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
+          if (seat === S.turn && !S._resolving) resolve();
+          return;
         }
       }
     }
@@ -856,13 +838,11 @@ function updateHUD(){
   const strong = autoAirportPill?.querySelector("strong");
   if (strong) strong.textContent = S.airport || "—";
 
-  // (We still keep the celebratory text here; the big Kapow happens in resolve().)
   if(S.bank.K >= 5000 && S.bank.C <= -5000) setLog(` ${nameOf('K').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
   else if(S.bank.C >= 5000 && S.bank.K <= -5000) setLog(` ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
 }
 
 function renderDealt(){
-  if(!S.dealt) return;
   const {A,B} = S.dealt;
   const originA = A.origin && A.origin !== "—" ? A.origin : "???";
   const originB = B.origin && B.origin !== "—" ? B.origin : "???";
@@ -948,7 +928,7 @@ async function deal(){
 
   S._resolving = false;
   S._landed = {A:false, B:false};
-  S._animationRunning = false;  // Reset animation flag
+  S._animationRunning = false;
 
   ['A','B'].forEach(k=>{
     const f = S.dealt[k];
@@ -1040,10 +1020,21 @@ async function resolve(){
   const now = Date.now();
   const baseTime = S.etaBaselineTime || S.raceStartTime || now;
   const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
-  const remA = Math.max(0, (S.etaBaseline.A ?? 0) - elapsedMinSinceBase);
-  const remB = Math.max(0, (S.etaBaseline.B ?? 0) - elapsedMinSinceBase);
 
-  const winner = remA <= remB ? 'A' : 'B';
+  // Prefer physical landing status to decide winner
+  const aLanded = !!S._landed.A;
+  const bLanded = !!S._landed.B;
+
+  let winner;
+  if (aLanded && !bLanded) winner = 'A';
+  else if (bLanded && !aLanded) winner = 'B';
+  else {
+    // Fall back to displayed remaining
+    const remA = Math.max(0, (S.etaBaseline.A ?? 0) - elapsedMinSinceBase);
+    const remB = Math.max(0, (S.etaBaseline.B ?? 0) - elapsedMinSinceBase);
+    winner = remA <= remB ? 'A' : 'B';
+  }
+
   const turnPlayer = S.turn;
   const oppPlayer = S.turn === "K" ? "C" : "K";
   const turnChoice = S.chosen;
@@ -1063,7 +1054,7 @@ async function resolve(){
   const winnerName = nameOf(winnerSeat);
   const loserName  = nameOf(loserSeat);
   const bonusText  = isLongshotWin ? ` (longshot ×${(S.odds.mult||1).toFixed(2)})` : "";
-  setLog(`Flight ${winner} wins! ${winnerName} takes ${fmtUSD(payout)}${bonusText} from ${loserName}.`);
+  setLog(`Flight ${winner} wins! ${winnerName} takes $${payout}${bonusText} from ${loserName}.`);
 
   // WINNER Kapow
   showKapow("WINNER!", {
@@ -1091,7 +1082,7 @@ async function resolve(){
   S.pickedBy = {A:null, B:null};
   if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
   if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
-  S._animationRunning = false; // ensure next race can start
+  S._animationRunning = false;
 
   // CHAMPION Kapow (match victory)
   const kChampion = S.bank.K >= 5000 && S.bank.C <= -5000;
