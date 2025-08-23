@@ -32,35 +32,44 @@ function showError(msg){
   setTimeout(() => b.remove(), 5000);
 }
 
-/* ===== Identity (PID in URL, localStorage fallback) ===== */
-let MY_ID = null;
-function getPlayerId(){
-  if (MY_ID) return MY_ID;
-
-  const url = new URL(location.href);
-  let pid = url.searchParams.get('pid');
-
-  // Fallback to localStorage if no pid in URL
-  if (!pid) {
-    try { pid = localStorage.getItem('diplomatPlayerId') || ""; } catch {}
-  }
-
-  // Generate if still missing
-  if (!pid) {
-    pid = "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
-    try { localStorage.setItem('diplomatPlayerId', pid); } catch {}
-  }
-
-  // Persist PID into URL if not present
-  if (!url.searchParams.get('pid')) {
-    url.searchParams.set('pid', pid);
-    history.replaceState(null, "", url.toString());
-  }
-
-  MY_ID = pid;
-  return pid;
+/* ===== Identity helpers (URL PID + safe fallbacks) ===== */
+function isValidPlayerId(x){
+  return typeof x === "string" && x.startsWith("player-") && x.length >= 18;
 }
-const isValidPlayerId = (s)=> typeof s === "string" && s.startsWith("player-");
+function getSeatHint(){
+  const u = new URL(location.href);
+  const s = (u.searchParams.get("seat") || "").toUpperCase();
+  return (s === "K" || s === "C") ? s : null;
+}
+function getPlayerId(){
+  // 1) URL param wins
+  try{
+    const u = new URL(location.href);
+    const fromUrl = u.searchParams.get("pid");
+    if (isValidPlayerId(fromUrl)) return fromUrl;
+
+    // 2) localStorage (best-effort; may fail on Safari iOS)
+    try{
+      const ls = localStorage.getItem("diplomatPlayerId");
+      if (isValidPlayerId(ls)) {
+        // also reflect in URL for Safari/session continuity
+        u.searchParams.set("pid", ls);
+        history.replaceState(null, "", u.toString());
+        return ls;
+      }
+    }catch(e){ /* ignore */ }
+
+    // 3) Generate a fresh one and stamp it into URL (and try to persist)
+    const pid = "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+    u.searchParams.set("pid", pid);
+    history.replaceState(null, "", u.toString());
+    try{ localStorage.setItem("diplomatPlayerId", pid); }catch(e){ /* ignore */ }
+    return pid;
+  }catch(e){
+    // Ultra fallback (never hits for real browsers)
+    return "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+  }
+}
 
 /* -------- Firebase init -------- */
 async function initFirebase(){
@@ -87,7 +96,19 @@ function randomCode(n=6){
   const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
   return Array.from({length:n},()=>a[Math.floor(Math.random()*a.length)]).join(''); 
 }
-function currentUrlWithRoom(id){ const u=new URL(location.href); u.searchParams.set("room", id); return u.toString(); }
+function currentUrlWithRoom(id){ 
+  const u=new URL(location.href); 
+  u.searchParams.set("room", id); 
+  return u.toString(); 
+}
+function buildInviteUrl(id){
+  // Always copy a CLEAN link: room + seat=C, NO pid
+  const u = new URL(location.href);
+  u.searchParams.set("room", id);
+  u.searchParams.set("seat", "C"); // hint guest to take Kessler
+  u.searchParams.delete("pid");
+  return u.toString();
+}
 
 async function ensureRoom(){
   if(!db){ const ok = await initFirebase(); if(!ok) return null; }
@@ -98,9 +119,8 @@ async function ensureRoom(){
 
   roomRef = window.firebaseDoc(db, "rooms", roomId);
 
-  // Get persistent player ID + any seat hint from URL
   const myId = getPlayerId();
-  const seatHint = url.searchParams.get('seat'); // 'K' | 'C' | null
+  const seatHint = getSeatHint();
 
   // Get or create
   let snap;
@@ -122,30 +142,42 @@ async function ensureRoom(){
     }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
   }
 
-  // Claim a seat (PID-aware, with seat-hint)
+  // Claim a seat (respect identity + hint; don't overwrite someone else's)
   try{
     const claim = await window.firebaseRunTransaction(db, async (tx)=>{
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
-      const seats = d.seats || {K:"", C:""};
+      const seats = { ...(d.seats || {K:"", C:""}) };
 
-      // If we already own a seat, keep it
+      // Do I already own a seat?
       if (seats.K === myId) return "K";
       if (seats.C === myId) return "C";
 
-      // Try seat hint first if valid and free/invalid
-      if (seatHint === "K" && !isValidPlayerId(seats.K)) { seats.K = myId; tx.update(roomRef, {seats}); return "K"; }
-      if (seatHint === "C" && !isValidPlayerId(seats.C)) { seats.C = myId; tx.update(roomRef, {seats}); return "C"; }
+      const Kfree = !isValidPlayerId(seats.K);
+      const Cfree = !isValidPlayerId(seats.C);
+      let pick = "Solo";
 
-      // Otherwise take first available/invalid seat
-      if (!isValidPlayerId(seats.K)) { seats.K = myId; tx.update(roomRef, {seats}); return "K"; }
-      if (!isValidPlayerId(seats.C)) { seats.C = myId; tx.update(roomRef, {seats}); return "C"; }
+      if (Kfree && Cfree){
+        // both open → try hint, else default K
+        const pref = (seatHint === "K" || seatHint === "C") ? seatHint : "K";
+        seats[pref] = myId;
+        pick = pref;
+      }else if (Kfree){
+        seats.K = myId; pick = "K";
+      }else if (Cfree){
+        seats.C = myId; pick = "C";
+      }else{
+        // both taken by others
+        pick = "Solo";
+      }
 
-      // Both are occupied by valid players
-      return "Solo";
+      if (pick !== "Solo") tx.update(roomRef, { seats });
+      return pick;
     });
-    seat = claim; setSeatLabel(seat); seatPill.title = `Room: ${roomId}`;
-    console.log(`[DL] Seat=${seat} myId=${myId}`);
+    seat = claim; 
+    setSeatLabel(seat); 
+    seatPill.title = `Room: ${roomId}`;
+    refreshSeatButtons(); // update visibility immediately
   }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
 
   // Live listener
@@ -153,11 +185,14 @@ async function ensureRoom(){
   unsubRoom = window.firebaseOnSnapshot(roomRef, (doc)=>{
     const D = doc.data(); if(!D) return;
 
-    // Detect if we lost our seat (another PID took it)
-    const currentSeats = D.seats || {};
+    // If we lost our seat (someone else claimed), drop to Solo
     const myIdNow = getPlayerId();
-    if (seat === "K" && currentSeats.K !== myIdNow) { seat = "Solo"; setSeatLabel(seat); }
-    if (seat === "C" && currentSeats.C !== myIdNow) { seat = "Solo"; setSeatLabel(seat); }
+    if (seat !== "Solo") {
+      if (seat === "K" && D.seats?.K !== myIdNow){ seat = "Solo"; setSeatLabel(seat); }
+      if (seat === "C" && D.seats?.C !== myIdNow){ seat = "Solo"; setSeatLabel(seat); }
+    }
+    // Also update button disable state by live seat availability
+    updateSeatButtonsDisable(D.seats || {K:"", C:""});
 
     const wasRacing = S.racing;
     const oldChosen = S.chosen;
@@ -226,6 +261,8 @@ async function ensureRoom(){
     }else{
       setLog("Deal flights to start.");
     }
+
+    refreshSeatButtons(); // show/hide by my current seat
   }, (err)=>{ console.error("[DL] room snapshot error:", err); showError("Lost connection. Reload the page."); });
 
   return roomRef;
@@ -246,7 +283,10 @@ async function createRoom(){
       pickedBy: {A:null, B:null},
       odds: null
     });
-    history.replaceState(null, "", currentUrlWithRoom(id)); // preserves pid/seat params
+    // Host link: prefer K (host is "Cajun")
+    const u = new URL(currentUrlWithRoom(id));
+    u.searchParams.set("seat","K");
+    history.replaceState(null, "", u.toString());
     toast(`Room created: ${id}`);
     await ensureRoom();
   }catch(e){ console.error("[DL] createRoom error:", e); showError("Failed to create room."); }
@@ -255,16 +295,9 @@ async function createRoom(){
 async function copyInvite(){
   if(!roomId) await createRoom();
   if(!roomId) return;
-
-  // Build invite URL that includes the room, a seat hint for the GUEST,
-  // and explicitly strips *your* pid so they generate their own.
-  const u = new URL(currentUrlWithRoom(roomId));
-  u.searchParams.delete('pid');
-  const hint = (seat === "K" ? "C" : "K"); // invitee should be the opposite seat
-  u.searchParams.set('seat', hint);
-
-  try{ await navigator.clipboard.writeText(u.toString()); toast("Invite link copied!"); }
-  catch(e){ console.error("[DL] clipboard error:", e); prompt("Copy this link:", u.toString()); }
+  const invite = buildInviteUrl(roomId);
+  try{ await navigator.clipboard.writeText(invite); toast("Invite link copied!"); }
+  catch(e){ console.error("[DL] clipboard error:", e); prompt("Copy this link:", invite); }
 }
 
 /* =================== UI refs =================== */
@@ -442,17 +475,17 @@ function updateConnectionStatus(success) {
       position: fixed; top: 10px; right: 10px; padding: 6px 12px;
       background: rgba(255,255,255,0.9); border-radius: 20px; font-size: 12px; font-weight: 700;
       box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 1000;`;
-    el.innerHTML = ' Live';
+    el.innerHTML = '🟢 Live';
     document.body.appendChild(el);
   }
   if (success) {
     connectionFailures = 0;
-    el.innerHTML = ' Live';
+    el.innerHTML = '🟢 Live';
     el.style.background = 'rgba(255,255,255,0.9)';
   } else {
     connectionFailures++;
     if (connectionFailures >= 2) {
-      el.innerHTML = ' Interpolating';
+      el.innerHTML = '🟡 Interpolating';
       el.style.background = 'rgba(255,240,240,0.9)';
     }
   }
@@ -512,8 +545,7 @@ async function updateLivePositions() {
 
         // Prevent "time being added": clamp to baseline-minus-elapsed (+tiny wiggle)
         const raceStart = S.raceStartTime || now;
-        theElapsed = (now - raceStart) / 60000; // minutes
-        const elapsedSinceRaceStart = theElapsed < 0 ? 0 : theElapsed;
+        const elapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
         const originalETA = S.etaBaseline[which] ?? f.etaMinutes; // baseline at start
         const expectedRemaining = Math.max(0, originalETA - elapsedSinceRaceStart);
         const MAX_UP_MIN = 2;
@@ -628,8 +660,8 @@ function startRaceAnimation(){
     const now = Date.now();
 
     // Progress bars via segments
-    const { t: tA, rem: remSegA } = segRemaining('A', now);
-    const { t: tB, rem: remSegB } = segRemaining('B', now);
+    const { t: tA } = segRemaining('A', now);
+    const { t: tB } = segRemaining('B', now);
     barA.style.width = (tA*100).toFixed(1)+"%";
     barB.style.width = (tB*100).toFixed(1)+"%";
 
@@ -673,7 +705,7 @@ function startRaceAnimation(){
         const distA = milesBetween(alat, alng, dlat, dlng);
         const distB = milesBetween(blat, blng, dlat, dlng);
 
-        // --- Implied ground speed (mph), based on distance / remaining time ---
+        // --- Implied ground speed (mph) ---
         const mphA = showA > 0 ? Math.round((distA / showA) * 60) : 0;
         const mphB = showB > 0 ? Math.round((distB / showB) * 60) : 0;
 
@@ -949,7 +981,7 @@ function renderDealt(){
     etaA.textContent = "ETA — (hidden until pick)";
     etaB.textContent = "ETA — (hidden until pick)";
   } else {
-    // Show mph after pick using current distance / minutes
+    // show mph pre-race (after pick) using current distance / minutes
     const miA = Number(etaA.dataset.mi || 0);
     const miB = Number(etaB.dataset.mi || 0);
     const mphA = A.etaMinutes > 0 ? Math.round((miA / A.etaMinutes) * 60) : 0;
@@ -1188,6 +1220,92 @@ async function resolve(){
   }
 }
 
+/* =================== OPTIONAL: Manual seat claim buttons =================== */
+// runtime-created UI: only shown when seat === "Solo"
+let _seatUI = { box:null, cajunBtn:null, kessBtn:null };
+function ensureSeatButtons(){
+  if (_seatUI.box) return _seatUI;
+
+  const box = document.createElement("div");
+  box.id = "seatActions";
+  box.style.cssText = `
+    position: fixed; bottom: 14px; left: 14px; z-index: 1000;
+    display: none; gap: 8px; align-items: center;
+    background: rgba(255,255,255,0.95); padding: 8px 10px; border-radius: 12px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.12); font-weight: 700;`;
+
+  const bCajun = document.createElement("button");
+  bCajun.textContent = "Join as Cajun";
+  bCajun.style.cssText = `
+    border: 0; padding: 8px 10px; border-radius: 10px;
+    cursor: pointer; font-weight: 700;`;
+  bCajun.addEventListener("click", ()=> claimSeat("K"));
+
+  const bKess = document.createElement("button");
+  bKess.textContent = "Join as Kessler";
+  bKess.style.cssText = `
+    border: 0; padding: 8px 10px; border-radius: 10px;
+    cursor: pointer; font-weight: 700;`;
+  bKess.addEventListener("click", ()=> claimSeat("C"));
+
+  box.appendChild(bCajun);
+  box.appendChild(bKess);
+  document.body.appendChild(box);
+
+  _seatUI = { box, cajunBtn: bCajun, kessBtn: bKess };
+  return _seatUI;
+}
+function refreshSeatButtons(){
+  const ui = ensureSeatButtons();
+  ui.box.style.display = (seat === "Solo") ? "flex" : "none";
+}
+function updateSeatButtonsDisable(seats){
+  const ui = ensureSeatButtons();
+  if (seat !== "Solo"){ ui.box.style.display = "none"; return; }
+  const kTaken = isValidPlayerId(seats.K);
+  const cTaken = isValidPlayerId(seats.C);
+  ui.cajunBtn.disabled = !!kTaken;
+  ui.kessBtn.disabled  = !!cTaken;
+  ui.cajunBtn.style.opacity = kTaken ? "0.5" : "1";
+  ui.kessBtn.style.opacity  = cTaken ? "0.5" : "1";
+}
+async function claimSeat(wantSeat) {
+  if (!roomRef) return;
+  const myId = getPlayerId();
+  try {
+    const result = await window.firebaseRunTransaction(db, async (tx) => {
+      const dSnap = await tx.get(roomRef);
+      const d = dSnap.data() || {};
+      const seats = {...(d.seats || { K:"", C:"" })};
+      const other = wantSeat === "K" ? "C" : "K";
+
+      // already mine?
+      if (seats[wantSeat] === myId) return wantSeat;
+
+      // target seat free/invalid? take it; and release my other if I had it
+      if (!isValidPlayerId(seats[wantSeat])) {
+        if (seats[other] === myId) seats[other] = "";
+        seats[wantSeat] = myId;
+        tx.update(roomRef, { seats });
+        return wantSeat;
+      }
+      return "Solo"; // taken by someone else
+    });
+
+    if (result === "K" || result === "C") {
+      seat = result;
+      setSeatLabel(seat);
+      refreshSeatButtons();
+      toast(`You are now ${nameOf(seat)}!`);
+    } else {
+      toast("That seat is taken.");
+    }
+  } catch (e) {
+    console.error("[DL] Seat claim failed:", e);
+    showError("Seat claim failed.");
+  }
+}
+
 /* =================== Events =================== */
 byId("A").addEventListener("click", ()=> start('A'));
 byId("B").addEventListener("click", ()=> start('B'));
@@ -1232,6 +1350,9 @@ copyBtn.addEventListener("click", copyInvite);
   };
   img.onerror = function() { console.warn("[DL] Could not load sofa image, using placeholder"); };
   img.src = "./sofawithkesslerandcajun.png";
+
+  ensureSeatButtons(); // create once
+  refreshSeatButtons(); // initial state
 
   await initFirebase();
   await ensureRoom();
