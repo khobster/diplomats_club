@@ -52,10 +52,8 @@
       --blue:#055aff; --good:#079455; --bad:#e11d48;
       --ring:#e8edf4; --shadow:rgba(16,24,40,.08);
       --stage-max: 900px;
-
-      /* compact layout dials */
-      --stage-width: 340px;  /* smaller couch card */
-      --map-height: 300px;   /* bigger maps */
+      --stage-width: 340px;
+      --map-height: 300px;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -73,11 +71,12 @@
       flex-wrap: wrap;
     }
     .brand{font-weight:800; letter-spacing:.06em}
-    .pill{display:inline-flex; align-items:center; gap:8px; border:1px solid var(--ring); border-radius:999px; padding:8px 12px; box-shadow:0 3px 10px var(--shadow)}
+    .pill{display:inline-flex; align-items:center; gap:8px; border:1px solid var(--ring); border-radius:999px; padding:8px 12px; box-shadow:0 3px 10px var(--shadow); background:#fff; font-weight:800; font-size:14px}
     .btn{border:1px solid var(--ring); border-radius:10px; padding:10px 14px; font-weight:800; cursor:pointer; background:#f6faff; font-size: 14px;}
     .btn.primary{background:var(--blue); color:#fff; border-color:var(--blue)}
     .btn:disabled{opacity:.55; cursor:not-allowed}
     .btn:hover:not(:disabled) { opacity: 0.9; }
+    .header-right{display:flex; gap:8px; align-items:center}
 
     /* Stage (smaller) */
     main{ width:100%; max-width:var(--stage-max); padding:6px 16px 16px; display:flex; flex-direction:column; align-items:center; gap:8px }
@@ -146,6 +145,7 @@
       .arena{ grid-template-columns:1fr }
       header { justify-content: center; }
       :root{ --map-height: 240px; --stage-width: 300px; }
+      .header-right{ flex-wrap: wrap; justify-content: center; }
     }
 
     /* Face animation */
@@ -183,8 +183,10 @@
 <body class="compact">
   <header>
     <div class="brand">Diplomat's Lounge</div>
-    <div class="pill" id="seatPill" title="Your seat">Seat: <strong id="seatName">Solo</strong></div>
-    <div style="display:flex; gap:8px">
+    <div class="header-right">
+      <div class="pill" id="seatPill" title="Your seat">Seat: <strong id="seatName">Solo</strong></div>
+      <!-- Live status pill: game.js will update this element's text/background -->
+      <div class="pill" id="connection-status">🟢 Live</div>
       <button id="newRoom" class="btn">New room</button>
       <button id="copyLink" class="btn">Copy invite</button>
     </div>
@@ -216,7 +218,7 @@
       </svg>
     </div>
 
-    <!-- Controls (lean: auto-picked airport shown, not editable) -->
+    <!-- Controls -->
     <div class="controls">
       <div class="ctl">
         <div class="pill" id="autoAirport">Airport: <strong>—</strong></div>
@@ -227,9 +229,10 @@
     </div>
 
     <div class="bankRow">
-      <span><span id="nameK">Kessler</span>: <span id="bankK" class="zero">$0</span></span>
+      <!-- K (left) is Cajun; C (right) is Kessler -->
+      <span><span id="nameK">Cajun</span>: <span id="bankK" class="zero">$0</span></span>
       <span>·</span>
-      <span><span id="nameC">Cajun</span>: <span id="bankC" class="zero">$0</span></span>
+      <span><span id="nameC">Kessler</span>: <span id="bankC" class="zero">$0</span></span>
       <span style="display:block; width:100%; font-size:14px; color:var(--muted); margin-top:6px;">
         First to +$5,000 (while opponent is -$5,000) wins!
       </span>
