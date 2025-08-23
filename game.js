@@ -52,6 +52,23 @@ async function initFirebase(){
 }
 function disableRooms(reason){ newRoomBtn.disabled = true; copyBtn.disabled = true; console.warn("[DL] Rooms disabled:", reason); }
 
+/* -------- Persistent Player ID -------- */
+function getPlayerId(){
+  // Try localStorage; fall back to in-memory for environments that block it
+  try{
+    let pid = localStorage.getItem('diplomatPlayerId');
+    if(!pid){
+      pid = "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+      localStorage.setItem('diplomatPlayerId', pid);
+    }
+    return pid;
+  }catch{
+    // Fallback (per-tab)
+    if(!getPlayerId._mem){ getPlayerId._mem = "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
+    return getPlayerId._mem;
+  }
+}
+
 /* -------- Rooms -------- */
 function randomCode(n=6){ 
   const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
@@ -67,6 +84,8 @@ async function ensureRoom(){
   if(!roomId) return null;
 
   roomRef = window.firebaseDoc(db, "rooms", roomId);
+
+  const myId = getPlayerId();
 
   // Get or create
   let snap;
@@ -88,14 +107,26 @@ async function ensureRoom(){
     }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
   }
 
-  // Claim a seat
-  const myId = "anon-"+Math.random().toString(36).slice(2,8);
+  // Claim a seat (reuse if we already own one; otherwise fill first empty/abandoned)
   try{
     const claim = await window.firebaseRunTransaction(db, async (tx)=>{
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
-      let pick = (d.seats?.K) ? ((d.seats?.C) ? "Solo" : "C") : "K";
-      if(pick !== "Solo"){ const seats = {...(d.seats||{})}; seats[pick] = myId; tx.update(roomRef, {seats}); }
+      const seats = { ...(d.seats || {K:"", C:""}) };
+      const valid = (v)=> typeof v === 'string' && v.startsWith('player-');
+
+      // Already own a seat?
+      if (seats.K === myId) return "K";
+      if (seats.C === myId) return "C";
+
+      let pick = "Solo";
+      // Prefer filling K then C, treating non-player IDs as abandoned
+      if (!seats.K || !valid(seats.K)) {
+        seats.K = myId; pick = "K";
+      } else if (!seats.C || !valid(seats.C)) {
+        seats.C = myId; pick = "C";
+      }
+      if (pick !== "Solo") tx.update(roomRef, {seats});
       return pick;
     });
     seat = claim; setSeatLabel(seat); seatPill.title = `Room: ${roomId}`;
@@ -105,6 +136,17 @@ async function ensureRoom(){
   if (unsubRoom) unsubRoom();
   unsubRoom = window.firebaseOnSnapshot(roomRef, (doc)=>{
     const D = doc.data(); if(!D) return;
+
+    // If we somehow lost our seat (another client claimed it), reflect Solo
+    const myIdNow = getPlayerId();
+    if (seat !== "Solo") {
+      const s = D.seats || {};
+      if ((seat === "K" && s.K !== myIdNow) || (seat === "C" && s.C !== myIdNow)) {
+        console.log(`[DL] Seat ${seat} no longer ours (now ${s[seat]}). Dropping to Solo.`);
+        seat = "Solo";
+        setSeatLabel(seat);
+      }
+    }
 
     const wasRacing = S.racing;
     const oldChosen = S.chosen;
@@ -180,12 +222,13 @@ async function ensureRoom(){
 
 async function createRoom(){
   if(!db){ const ok = await initFirebase(); if(!ok){ alert("Cannot create room."); return; } }
+  const myId = getPlayerId(); // host identity persists
   try{
     const id = randomCode(6);
     const newRoomRef = window.firebaseDoc(db, "rooms", id);
     await window.firebaseSetDoc(newRoomRef, {
       createdAt: Date.now(),
-      seats: {K:"", C:""},
+      seats: {K: myId, C:""}, // host is always Cajun (K)
       bank: {K:0, C:0},
       airport:"JFK", bet:50, live:true,
       dealt:null, destPos:null,
@@ -195,7 +238,7 @@ async function createRoom(){
     });
     history.replaceState(null, "", currentUrlWithRoom(id));
     toast(`Room created: ${id}`);
-    await ensureRoom();
+    await ensureRoom(); // will see we already own K
   }catch(e){ console.error("[DL] createRoom error:", e); showError("Failed to create room."); }
 }
 
@@ -612,7 +655,7 @@ function startRaceAnimation(){
         const distA = milesBetween(alat, alng, dlat, dlng);
         const distB = milesBetween(blat, blng, dlat, dlng);
 
-        // --- NEW: implied ground speed (mph), based on distance / remaining time ---
+        // --- implied ground speed (mph), based on distance / remaining time ---
         const mphA = showA > 0 ? Math.round((distA / showA) * 60) : 0;
         const mphB = showB > 0 ? Math.round((distB / showB) * 60) : 0;
 
@@ -888,7 +931,7 @@ function renderDealt(){
     etaA.textContent = "ETA — (hidden until pick)";
     etaB.textContent = "ETA — (hidden until pick)";
   } else {
-    // --- NEW: show mph pre-race (after pick) using current distance / minutes ---
+    // show mph pre-race (after pick) using current distance / minutes
     const miA = Number(etaA.dataset.mi || 0);
     const miB = Number(etaB.dataset.mi || 0);
     const mphA = A.etaMinutes > 0 ? Math.round((miA / A.etaMinutes) * 60) : 0;
