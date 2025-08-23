@@ -32,6 +32,36 @@ function showError(msg){
   setTimeout(() => b.remove(), 5000);
 }
 
+/* ===== Identity (PID in URL, localStorage fallback) ===== */
+let MY_ID = null;
+function getPlayerId(){
+  if (MY_ID) return MY_ID;
+
+  const url = new URL(location.href);
+  let pid = url.searchParams.get('pid');
+
+  // Fallback to localStorage if no pid in URL
+  if (!pid) {
+    try { pid = localStorage.getItem('diplomatPlayerId') || ""; } catch {}
+  }
+
+  // Generate if still missing
+  if (!pid) {
+    pid = "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+    try { localStorage.setItem('diplomatPlayerId', pid); } catch {}
+  }
+
+  // Persist PID into URL if not present
+  if (!url.searchParams.get('pid')) {
+    url.searchParams.set('pid', pid);
+    history.replaceState(null, "", url.toString());
+  }
+
+  MY_ID = pid;
+  return pid;
+}
+const isValidPlayerId = (s)=> typeof s === "string" && s.startsWith("player-");
+
 /* -------- Firebase init -------- */
 async function initFirebase(){
   let attempts = 0;
@@ -52,23 +82,6 @@ async function initFirebase(){
 }
 function disableRooms(reason){ newRoomBtn.disabled = true; copyBtn.disabled = true; console.warn("[DL] Rooms disabled:", reason); }
 
-/* -------- Persistent Player ID -------- */
-function getPlayerId(){
-  // Try localStorage; fall back to in-memory for environments that block it
-  try{
-    let pid = localStorage.getItem('diplomatPlayerId');
-    if(!pid){
-      pid = "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
-      localStorage.setItem('diplomatPlayerId', pid);
-    }
-    return pid;
-  }catch{
-    // Fallback (per-tab)
-    if(!getPlayerId._mem){ getPlayerId._mem = "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
-    return getPlayerId._mem;
-  }
-}
-
 /* -------- Rooms -------- */
 function randomCode(n=6){ 
   const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
@@ -85,7 +98,9 @@ async function ensureRoom(){
 
   roomRef = window.firebaseDoc(db, "rooms", roomId);
 
+  // Get persistent player ID + any seat hint from URL
   const myId = getPlayerId();
+  const seatHint = url.searchParams.get('seat'); // 'K' | 'C' | null
 
   // Get or create
   let snap;
@@ -107,29 +122,30 @@ async function ensureRoom(){
     }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
   }
 
-  // Claim a seat (reuse if we already own one; otherwise fill first empty/abandoned)
+  // Claim a seat (PID-aware, with seat-hint)
   try{
     const claim = await window.firebaseRunTransaction(db, async (tx)=>{
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
-      const seats = { ...(d.seats || {K:"", C:""}) };
-      const valid = (v)=> typeof v === 'string' && v.startsWith('player-');
+      const seats = d.seats || {K:"", C:""};
 
-      // Already own a seat?
+      // If we already own a seat, keep it
       if (seats.K === myId) return "K";
       if (seats.C === myId) return "C";
 
-      let pick = "Solo";
-      // Prefer filling K then C, treating non-player IDs as abandoned
-      if (!seats.K || !valid(seats.K)) {
-        seats.K = myId; pick = "K";
-      } else if (!seats.C || !valid(seats.C)) {
-        seats.C = myId; pick = "C";
-      }
-      if (pick !== "Solo") tx.update(roomRef, {seats});
-      return pick;
+      // Try seat hint first if valid and free/invalid
+      if (seatHint === "K" && !isValidPlayerId(seats.K)) { seats.K = myId; tx.update(roomRef, {seats}); return "K"; }
+      if (seatHint === "C" && !isValidPlayerId(seats.C)) { seats.C = myId; tx.update(roomRef, {seats}); return "C"; }
+
+      // Otherwise take first available/invalid seat
+      if (!isValidPlayerId(seats.K)) { seats.K = myId; tx.update(roomRef, {seats}); return "K"; }
+      if (!isValidPlayerId(seats.C)) { seats.C = myId; tx.update(roomRef, {seats}); return "C"; }
+
+      // Both are occupied by valid players
+      return "Solo";
     });
     seat = claim; setSeatLabel(seat); seatPill.title = `Room: ${roomId}`;
+    console.log(`[DL] Seat=${seat} myId=${myId}`);
   }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
 
   // Live listener
@@ -137,16 +153,11 @@ async function ensureRoom(){
   unsubRoom = window.firebaseOnSnapshot(roomRef, (doc)=>{
     const D = doc.data(); if(!D) return;
 
-    // If we somehow lost our seat (another client claimed it), reflect Solo
+    // Detect if we lost our seat (another PID took it)
+    const currentSeats = D.seats || {};
     const myIdNow = getPlayerId();
-    if (seat !== "Solo") {
-      const s = D.seats || {};
-      if ((seat === "K" && s.K !== myIdNow) || (seat === "C" && s.C !== myIdNow)) {
-        console.log(`[DL] Seat ${seat} no longer ours (now ${s[seat]}). Dropping to Solo.`);
-        seat = "Solo";
-        setSeatLabel(seat);
-      }
-    }
+    if (seat === "K" && currentSeats.K !== myIdNow) { seat = "Solo"; setSeatLabel(seat); }
+    if (seat === "C" && currentSeats.C !== myIdNow) { seat = "Solo"; setSeatLabel(seat); }
 
     const wasRacing = S.racing;
     const oldChosen = S.chosen;
@@ -222,13 +233,12 @@ async function ensureRoom(){
 
 async function createRoom(){
   if(!db){ const ok = await initFirebase(); if(!ok){ alert("Cannot create room."); return; } }
-  const myId = getPlayerId(); // host identity persists
   try{
     const id = randomCode(6);
     const newRoomRef = window.firebaseDoc(db, "rooms", id);
     await window.firebaseSetDoc(newRoomRef, {
       createdAt: Date.now(),
-      seats: {K: myId, C:""}, // host is always Cajun (K)
+      seats: {K:"", C:""},
       bank: {K:0, C:0},
       airport:"JFK", bet:50, live:true,
       dealt:null, destPos:null,
@@ -236,18 +246,25 @@ async function createRoom(){
       pickedBy: {A:null, B:null},
       odds: null
     });
-    history.replaceState(null, "", currentUrlWithRoom(id));
+    history.replaceState(null, "", currentUrlWithRoom(id)); // preserves pid/seat params
     toast(`Room created: ${id}`);
-    await ensureRoom(); // will see we already own K
+    await ensureRoom();
   }catch(e){ console.error("[DL] createRoom error:", e); showError("Failed to create room."); }
 }
 
 async function copyInvite(){
   if(!roomId) await createRoom();
   if(!roomId) return;
-  const u = currentUrlWithRoom(roomId);
-  try{ await navigator.clipboard.writeText(u); toast("Invite link copied!"); }
-  catch(e){ console.error("[DL] clipboard error:", e); prompt("Copy this link:", u); }
+
+  // Build invite URL that includes the room, a seat hint for the GUEST,
+  // and explicitly strips *your* pid so they generate their own.
+  const u = new URL(currentUrlWithRoom(roomId));
+  u.searchParams.delete('pid');
+  const hint = (seat === "K" ? "C" : "K"); // invitee should be the opposite seat
+  u.searchParams.set('seat', hint);
+
+  try{ await navigator.clipboard.writeText(u.toString()); toast("Invite link copied!"); }
+  catch(e){ console.error("[DL] clipboard error:", e); prompt("Copy this link:", u.toString()); }
 }
 
 /* =================== UI refs =================== */
@@ -495,7 +512,8 @@ async function updateLivePositions() {
 
         // Prevent "time being added": clamp to baseline-minus-elapsed (+tiny wiggle)
         const raceStart = S.raceStartTime || now;
-        const elapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
+        theElapsed = (now - raceStart) / 60000; // minutes
+        const elapsedSinceRaceStart = theElapsed < 0 ? 0 : theElapsed;
         const originalETA = S.etaBaseline[which] ?? f.etaMinutes; // baseline at start
         const expectedRemaining = Math.max(0, originalETA - elapsedSinceRaceStart);
         const MAX_UP_MIN = 2;
@@ -655,7 +673,7 @@ function startRaceAnimation(){
         const distA = milesBetween(alat, alng, dlat, dlng);
         const distB = milesBetween(blat, blng, dlat, dlng);
 
-        // --- implied ground speed (mph), based on distance / remaining time ---
+        // --- Implied ground speed (mph), based on distance / remaining time ---
         const mphA = showA > 0 ? Math.round((distA / showA) * 60) : 0;
         const mphB = showB > 0 ? Math.round((distB / showB) * 60) : 0;
 
@@ -931,7 +949,7 @@ function renderDealt(){
     etaA.textContent = "ETA — (hidden until pick)";
     etaB.textContent = "ETA — (hidden until pick)";
   } else {
-    // show mph pre-race (after pick) using current distance / minutes
+    // Show mph after pick using current distance / minutes
     const miA = Number(etaA.dataset.mi || 0);
     const miB = Number(etaB.dataset.mi || 0);
     const mphA = A.etaMinutes > 0 ? Math.round((miA / A.etaMinutes) * 60) : 0;
