@@ -78,7 +78,6 @@ async function ensureRoom(){
       await window.firebaseSetDoc(roomRef, {
         createdAt: Date.now(),
         seats: {K:"", C:""},
-        seatsHB: {K:0, C:0},          // <-- presence heartbeats
         bank: {K:0, C:0},
         airport:"JFK", bet:50, live:true,
         dealt:null, destPos:null,
@@ -89,43 +88,17 @@ async function ensureRoom(){
     }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
   }
 
-  // Claim a seat (with presence/heartbeat & stale eviction)
-  myId = getClientId();
+  // Claim a seat
+  const myId = "anon-"+Math.random().toString(36).slice(2,8);
   try{
     const claim = await window.firebaseRunTransaction(db, async (tx)=>{
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
-      const now = Date.now();
-
-      let seats = {...(d.seats || {K:"", C:""})};
-      let hb    = {...(d.seatsHB || {K:0, C:0})};
-
-      // Evict stale seats (no heartbeat within window)
-      ["K","C"].forEach(s=>{
-        const occupied = !!seats[s];
-        const lastBeat = hb[s] || 0;
-        if (occupied && (now - lastBeat > SEAT_STALE_MS)) {
-          seats[s] = "";
-          hb[s] = 0;
-        }
-      });
-
-      // If we already own a seat in this room, keep it
-      let pick = "Solo";
-      if (seats.K === myId) pick = "K";
-      else if (seats.C === myId) pick = "C";
-      else pick = seats.K ? (seats.C ? "Solo" : "C") : "K";
-
-      if (pick !== "Solo") {
-        seats[pick] = myId;
-        hb[pick] = now;
-      }
-
-      tx.update(roomRef, { seats, seatsHB: hb });
+      let pick = (d.seats?.K) ? ((d.seats?.C) ? "Solo" : "C") : "K";
+      if(pick !== "Solo"){ const seats = {...(d.seats||{})}; seats[pick] = myId; tx.update(roomRef, {seats}); }
       return pick;
     });
     seat = claim; setSeatLabel(seat); seatPill.title = `Room: ${roomId}`;
-    startSeatHeartbeat(); // keep the seat alive
   }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
 
   // Live listener
@@ -213,7 +186,6 @@ async function createRoom(){
     await window.firebaseSetDoc(newRoomRef, {
       createdAt: Date.now(),
       seats: {K:"", C:""},
-      seatsHB: {K:0, C:0},        // <-- presence heartbeats
       bank: {K:0, C:0},
       airport:"JFK", bet:50, live:true,
       dealt:null, destPos:null,
@@ -271,43 +243,6 @@ const AIRPORTS = {
   PHX:[33.4342,-112.0116], MSP:[44.8848,-93.2223], STL:[38.7487,-90.3700],
   MCO:[28.4312,-81.3081], SAN:[32.7338,-117.1933], PDX:[45.5898,-122.5951]
 };
-
-/* =================== Presence / Seats (NEW) =================== */
-const SEAT_STALE_MS = 90 * 1000;   // consider a seat stale after 90s with no heartbeat
-let myId = null;
-let _hbTimer = null;
-
-function getClientId(){
-  try {
-    const KEY = "dl_uid";
-    let id = localStorage.getItem(KEY);
-    if (!id) {
-      id = "anon-" + Math.random().toString(36).slice(2,10);
-      localStorage.setItem(KEY, id);
-    }
-    return id;
-  } catch {
-    return "anon-" + Math.random().toString(36).slice(2,10);
-  }
-}
-
-function startSeatHeartbeat(){
-  if (_hbTimer) { clearInterval(_hbTimer); _hbTimer = null; }
-  if (!roomRef || (seat !== "K" && seat !== "C")) return;
-
-  const beat = async ()=>{
-    if (!roomRef) return;
-    const patch = {};
-    patch[`seatsHB.${seat}`] = Date.now();
-    patch[`seats.${seat}`] = myId;  // keep ownership fresh
-    try { await window.firebaseUpdateDoc(roomRef, patch); }
-    catch(e){ console.warn("[DL] heartbeat failed", e); }
-  };
-
-  beat(); // immediate
-  _hbTimer = setInterval(beat, 20_000); // every 20s
-}
-window.addEventListener("beforeunload", ()=>{ if (_hbTimer) clearInterval(_hbTimer); });
 
 /* =================== State =================== */
 const S = {
@@ -447,17 +382,17 @@ function updateConnectionStatus(success) {
       position: fixed; top: 10px; right: 10px; padding: 6px 12px;
       background: rgba(255,255,255,0.9); border-radius: 20px; font-size: 12px; font-weight: 700;
       box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 1000;`;
-    el.innerHTML = '🟢 Live';
+    el.innerHTML = ' Live';
     document.body.appendChild(el);
   }
   if (success) {
     connectionFailures = 0;
-    el.innerHTML = '🟢 Live';
+    el.innerHTML = ' Live';
     el.style.background = 'rgba(255,255,255,0.9)';
   } else {
     connectionFailures++;
     if (connectionFailures >= 2) {
-      el.innerHTML = '🟡 Interpolating';
+      el.innerHTML = ' Interpolating';
       el.style.background = 'rgba(255,240,240,0.9)';
     }
   }
@@ -517,9 +452,9 @@ async function updateLivePositions() {
 
         // Prevent "time being added": clamp to baseline-minus-elapsed (+tiny wiggle)
         const raceStart = S.raceStartTime || now;
-        theElapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
+        const elapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
         const originalETA = S.etaBaseline[which] ?? f.etaMinutes; // baseline at start
-        const expectedRemaining = Math.max(0, originalETA - theElapsedSinceRaceStart);
+        const expectedRemaining = Math.max(0, originalETA - elapsedSinceRaceStart);
         const MAX_UP_MIN = 2;
         const adjustedETA = Math.min(apiETA, expectedRemaining + MAX_UP_MIN);
 
@@ -677,6 +612,10 @@ function startRaceAnimation(){
         const distA = milesBetween(alat, alng, dlat, dlng);
         const distB = milesBetween(blat, blng, dlat, dlng);
 
+        // --- NEW: implied ground speed (mph), based on distance / remaining time ---
+        const mphA = showA > 0 ? Math.round((distA / showA) * 60) : 0;
+        const mphB = showB > 0 ? Math.round((distB / showB) * 60) : 0;
+
         // Update card text (show "Landed" only when truly landed)
         if (S.chosen) {
           const landedA_and = (segA.t >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
@@ -684,11 +623,11 @@ function startRaceAnimation(){
           
           etaA.textContent = landedA_and
             ? "Landed"
-            : `ETA ${fmtClock(showA)} — ~${distA} mi`;
+            : `ETA ${fmtClock(showA)} — ~${distA} mi · ~${mphA} mph`;
 
           etaB.textContent = landedB_and
             ? "Landed"
-            : `ETA ${fmtClock(showB)} — ~${distB} mi`;
+            : `ETA ${fmtClock(showB)} — ~${distB} mi · ~${mphB} mph`;
         }
 
         // Stabilized leader based on displayed remaining
@@ -949,8 +888,14 @@ function renderDealt(){
     etaA.textContent = "ETA — (hidden until pick)";
     etaB.textContent = "ETA — (hidden until pick)";
   } else {
-    etaA.textContent = `ETA ~ ${Math.round(A.etaMinutes)} min — ~${etaA.dataset.mi} mi`;
-    etaB.textContent = `ETA ~ ${Math.round(B.etaMinutes)} min — ~${etaB.dataset.mi} mi`;
+    // --- NEW: show mph pre-race (after pick) using current distance / minutes ---
+    const miA = Number(etaA.dataset.mi || 0);
+    const miB = Number(etaB.dataset.mi || 0);
+    const mphA = A.etaMinutes > 0 ? Math.round((miA / A.etaMinutes) * 60) : 0;
+    const mphB = B.etaMinutes > 0 ? Math.round((miB / B.etaMinutes) * 60) : 0;
+
+    etaA.textContent = `ETA ~ ${Math.round(A.etaMinutes)} min — ~${miA} mi · ~${mphA} mph`;
+    etaB.textContent = `ETA ~ ${Math.round(B.etaMinutes)} min — ~${miB} mi · ~${mphB} mph`;
   }
 }
 
