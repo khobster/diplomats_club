@@ -439,6 +439,35 @@ async function fetchJSON(url, timeoutMs=9000){
   }
 }
 
+/* ---------- Bearing + plane icon helpers (for Leaflet) ---------- */
+function bearingDeg(fromLatLng, toLatLng){
+  // returns degrees clockwise from North
+  const toRad = (d)=>d*Math.PI/180, toDeg=(r)=>r*180/Math.PI;
+  const [lat1,lon1] = [toRad(fromLatLng[0]), toRad(fromLatLng[1])];
+  const [lat2,lon2] = [toRad(toLatLng[0]), toRad(toLatLng[1])];
+  const dLon = lon2 - lon1;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+// small north-pointing SVG; we rotate it in a nested div so Leaflet’s translate is untouched
+function planeDivIcon(angleDeg=0, color="#1e90ff"){
+  const svg = `
+    <div class="plane-rot" style="transform: rotate(${Math.round(angleDeg)}deg)">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <path d="M32 3l6 17h15L32 39l5 16-5-3-5 3 5-16L11 20h15z"
+              fill="${color}" stroke="#0c4a8e" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+    </div>`;
+  return L.divIcon({ className: 'plane', html: svg, iconSize: [28,28], iconAnchor: [14,14] });
+}
+function rotatePlane(which, deg){
+  const M = S.maps[which];
+  if(!M) return;
+  if (!M._rotEl) M._rotEl = M.plane.getElement()?.querySelector('.plane-rot');
+  if (M._rotEl) M._rotEl.style.transform = `rotate(${Math.round(deg)}deg)`;
+}
+
 /* =================== Kapow overlays =================== */
 function showKapow(title, opts={}){
   const {
@@ -467,27 +496,35 @@ function showKapow(title, opts={}){
 /* =================== Connection Status =================== */
 let connectionFailures = 0;
 function updateConnectionStatus(success) {
-  let el = document.getElementById('connection-status');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'connection-status';
-    el.style.cssText = `
-      position: fixed; top: 10px; right: 10px; padding: 6px 12px;
-      background: rgba(255,255,255,0.9); border-radius: 20px; font-size: 12px; font-weight: 700;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 1000;`;
-    el.innerHTML = '🟢 Live';
-    document.body.appendChild(el);
-  }
+  // Header pill (preferred)
+  const dot = byId('liveDot');
+  const txt = byId('liveText');
+
   if (success) {
     connectionFailures = 0;
-    el.innerHTML = '🟢 Live';
-    el.style.background = 'rgba(255,255,255,0.9)';
+    if (dot) dot.style.background = '#22c55e';
+    if (txt) txt.textContent = 'Live';
   } else {
     connectionFailures++;
     if (connectionFailures >= 2) {
-      el.innerHTML = '🟡 Interpolating';
-      el.style.background = 'rgba(255,240,240,0.9)';
+      if (dot) dot.style.background = '#f59e0b';
+      if (txt) txt.textContent = 'Interpolating';
     }
+  }
+
+  // Legacy corner badge fallback if header pill isn't present
+  let el = document.getElementById('connection-status');
+  if (!byId('livePill')) {
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'connection-status';
+      el.style.cssText = `
+        position: fixed; top: 10px; right: 10px; padding: 6px 12px;
+        background: rgba(255,255,255,0.9); border-radius: 20px; font-size: 12px; font-weight: 700;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 1000;`;
+      document.body.appendChild(el);
+    }
+    el.innerHTML = success ? '🟢 Live' : (connectionFailures >= 2 ? '🟡 Interpolating' : '🟢 Live');
   }
 }
 
@@ -660,8 +697,8 @@ function startRaceAnimation(){
     const now = Date.now();
 
     // Progress bars via segments
-    const { t: tA } = segRemaining('A', now);
-    const { t: tB } = segRemaining('B', now);
+    const { t: tA, rem: remSegA } = segRemaining('A', now);
+    const { t: tB, rem: remSegB } = segRemaining('B', now);
     barA.style.width = (tA*100).toFixed(1)+"%";
     barB.style.width = (tB*100).toFixed(1)+"%";
 
@@ -672,11 +709,13 @@ function startRaceAnimation(){
         const pA = segPos('A', now);
         S.maps.A.plane.setLatLng(pA);
         S.maps.A.line.setLatLngs([pA, dst]);
+        rotatePlane('A', bearingDeg(pA, dst));
       }
       if (!S._landed.B) {
         const pB = segPos('B', now);
         S.maps.B.plane.setLatLng(pB);
         S.maps.B.line.setLatLngs([pB, dst]);
+        rotatePlane('B', bearingDeg(pB, dst));
       }
     }
 
@@ -711,8 +750,8 @@ function startRaceAnimation(){
 
         // Update card text (show "Landed" only when truly landed)
         if (S.chosen) {
-          const landedA_and = (segA.t >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
-          const landedB_and = (segB.t >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
+          const landedA_and = (tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
+          const landedB_and = (tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
           
           etaA.textContent = landedA_and
             ? "Landed"
@@ -751,8 +790,8 @@ function startRaceAnimation(){
         S._lastBannerUpdate = now;
 
         // Landing detection: ONLY when interpolation finished AND within threshold
-        const landedA = (segA.t >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
-        const landedB = (segB.t >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
+        const landedA = (remSegA <= 0.01 || tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
+        const landedB = (remSegB <= 0.01 || tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
 
         if (!S._landed.A && landedA) {
           S._landed.A = true;
@@ -840,11 +879,19 @@ function ensureMap(which){
   try{
     const m = L.map(el, { zoomControl:false, attributionControl:false });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 15 }).addTo(m);
-    const plane = L.circleMarker([0,0], { radius:6, color:'#0077ff', fillColor:'#3ab8ff', fillOpacity:.9 }).addTo(m);
-    const dest = L.circleMarker([0,0], { radius:5, color:'#111827', fillColor:'#111827', fillOpacity:1 }).addTo(m);
-    const line = L.polyline([], { color:'#0ea5e9', weight:3, opacity:.9 }).addTo(m);
-    const group = L.featureGroup([plane, dest, line]).addTo(m);
-    S.maps[which] = { map:m, plane, dest, line, group };
+
+    const dstDot = L.circleMarker([0,0], { radius:5, color:'#111827', fillColor:'#111827', fillOpacity:1 }).addTo(m);
+    const pathLine = L.polyline([], { color:'#0ea5e9', weight:3, opacity:.9 }).addTo(m);
+
+    // Airplane marker (divIcon with inner rotator)
+    const plane = L.marker([0,0], { icon: planeDivIcon(0), interactive:false }).addTo(m);
+
+    const group = L.featureGroup([plane, dstDot, pathLine]).addTo(m);
+    S.maps[which] = { map:m, plane, dest: dstDot, line: pathLine, group, _rotEl: null };
+
+    // cache rotator element after the marker is in DOM
+    setTimeout(()=>{ S.maps[which]._rotEl = plane.getElement()?.querySelector('.plane-rot'); }, 0);
+
     return S.maps[which];
   }catch(e){ console.error("[DL] Map init failed:", e); return null; }
 }
@@ -872,6 +919,8 @@ function fitAndRender(which, flight, destPos){
   M.plane.setLatLng(pos); 
   M.dest.setLatLng(dst); 
   M.line.setLatLngs([pos, dst]);
+  rotatePlane(which, bearingDeg(pos, dst));
+
   const bounds = L.latLngBounds([pos, dst]).pad(0.35);
   M.map.fitBounds(bounds, { animate:false });
 
