@@ -283,7 +283,6 @@ function updateChatVisibility(both, seats){
   const someoneSeated = isValidPlayerId(seats?.K) || isValidPlayerId(seats?.C);
   const show = _chat.everUnlocked || someoneSeated;
   if (!_chat.minimized) ui.box.style.display = show ? 'flex' : 'none';
-  // keep mini pill if minimized & show==true
   ui.mini.style.display = (_chat.minimized && show) ? 'inline-flex' : 'none';
 }
 
@@ -366,7 +365,7 @@ const AIRPORTS = {
   ORD:[41.9742,-87.9073], MDW:[41.7868,-87.7522], DTW:[42.2124,-83.3534],
   CLT:[35.2144,-80.9473], RDU:[35.8801,-78.7880], BNA:[36.1263,-86.6774],
   DFW:[32.8998,-97.0403], DAL:[32.8471,-96.8517], IAH:[29.9902,-95.3368],
-  DEN:[39.8561,-104.6737], SLC:[40.7899,-111.9791], LAS:[36.0840,-115.1537],
+  DEN:[39.8561,-104.6739], SLC:[40.7899,-111.9791], LAS:[36.0840,-115.1537],
   LAX:[33.9416,-118.4085], SFO:[37.6213,-122.3790], SEA:[47.4502,-122.3088],
   PHX:[33.4342,-112.0116], MSP:[44.8848,-93.2223], STL:[38.7487,-90.3700],
   MCO:[28.4312,-81.3081], SAN:[32.7338,-117.1933], PDX:[45.5898,-122.5951]
@@ -563,6 +562,14 @@ function updateConnectionStatus(success) {
   }
 }
 
+/* ===== Turn-based control lock ===== */
+function updateTurnControls(){
+  const myTurn = (seat === S.turn);
+  const canAct = myTurn && !S.racing && (seat === "K" || seat === "C");
+  if (dealBtn) dealBtn.disabled = !canAct;
+  if (betIn)  betIn.disabled  = !canAct;
+}
+
 /* =================== Live Flight Updates =================== */
 async function updateLivePositions() {
   if(!S.racing || !S.dealt || !S.live || !S.airport) return;
@@ -603,6 +610,21 @@ async function updateLivePositions() {
       function rebase(which, updated){
         const f = S.dealt[which];
         const now = Date.now();
+
+        // If live pos is basically at destination, snap to landed immediately
+        if (updated.pos && Number.isFinite(updated.pos.lat) && Number.isFinite(updated.pos.lng)) {
+          const [dlat, dlng] = destLatLng();
+          const dmi = milesBetween(updated.pos.lat, updated.pos.lng, dlat, dlng);
+          if (dmi <= LANDING_MI_THRESHOLD) {
+            f.pos = { lat: updated.pos.lat, lng: updated.pos.lng };
+            S._landed[which] = true;
+            anchorSegment(which, [dlat, dlng], 0, now);
+            f.etaMinutes = 0;
+            changed = true;
+            return; // done
+          }
+        }
+
         const P = segPos(which, now);
 
         const hasLive = !!(updated.pos && Number.isFinite(updated.pos.lat) && Number.isFinite(updated.pos.lng));
@@ -629,8 +651,8 @@ async function updateLivePositions() {
         changed = true;
       }
 
-      if (updatedA) rebase('A', updatedA);
-      if (updatedB) rebase('B', updatedB);
+      if (updatedA && !S._landed.A) rebase('A', updatedA);
+      if (updatedB && !S._landed.B) rebase('B', updatedB);
 
       if(changed) {
         renderDealt(/*noFit*/ true); // don't force fit on live bumps
@@ -769,8 +791,8 @@ function startRaceAnimation(){
         const mphB = showB > 0 ? Math.round((distB / showB) * 60) : 0;
 
         if (S.chosen) {
-          const landedA_and = (tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
-          const landedB_and = (tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
+          const landedA_and = S._landed.A || ((tA >= 0.999 || remSegA <= 0.01) && (distA <= LANDING_MI_THRESHOLD));
+          const landedB_and = S._landed.B || ((tB >= 0.999 || remSegB <= 0.01) && (distB <= LANDING_MI_THRESHOLD));
           
           etaA.textContent = landedA_and
             ? "Landed"
@@ -807,8 +829,8 @@ function startRaceAnimation(){
 
         S._lastBannerUpdate = now;
 
-        const landedA = (remSegA <= 0.01 || tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
-        const landedB = (remSegB <= 0.01 || tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
+        const landedA = (S._landed.A || remSegA <= 0.01 || tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
+        const landedB = (S._landed.B || remSegB <= 0.01 || tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
 
         if (!S._landed.A && landedA) {
           S._landed.A = true;
@@ -1086,6 +1108,7 @@ function renderDealt(noFit=false){
 async function deal(){
   if(S.racing) return;
   if(seat!=="K" && seat!=="C"){ showBubble("K","Join a seat to play!"); return; }
+  if(S.turn !== seat){ showBubble(seat, "Wait for your turn"); return; }  // lock deal to turn owner
 
   S.bet = clamp(Number(betIn.value||MIN_BET), MIN_BET, 1e9);
   S.live = true;
@@ -1161,6 +1184,8 @@ async function deal(){
       });
     }catch(e){ console.warn("[DL] room update(deal) failed:", e); }
   }
+
+  updateTurnControls();
 }
 
 async function start(choice){
@@ -1214,6 +1239,7 @@ async function start(choice){
 
   renderDealt(); 
   startRaceAnimation();
+  updateTurnControls();
 }
 
 async function resolve(){
@@ -1306,6 +1332,8 @@ async function resolve(){
       console.warn("[DL] room update(resolve) failed:", e);
     }
   }
+
+  updateTurnControls();
 }
 
 /* =================== OPTIONAL: Manual seat claim buttons =================== */
@@ -1346,11 +1374,12 @@ function refreshSeatButtons(){
   const ui = ensureSeatButtons();
   ui.box.style.display = (seat === "Solo") ? "flex" : "none";
 }
-function updateSeatButtonsDisable(seats){
+function updateSeatButtonsDisable(seats, presence){
   const ui = ensureSeatButtons();
   if (seat !== "Solo"){ ui.box.style.display = "none"; return; }
-  const kTaken = isValidPlayerId(seats.K);
-  const cTaken = isValidPlayerId(seats.C);
+  const now = Date.now();
+  const kTaken = isValidPlayerId(seats.K) && !isSeatStale(seats, presence, 'K', now);
+  const cTaken = isValidPlayerId(seats.C) && !isSeatStale(seats, presence, 'C', now);
   ui.cajunBtn.disabled = !!kTaken;
   ui.kessBtn.disabled  = !!cTaken;
   ui.cajunBtn.style.opacity = kTaken ? "0.5" : "1";
@@ -1366,10 +1395,16 @@ async function claimSeat(wantSeat) {
       const seats = {...(d.seats || { K:"", C:"" })};
       const other = wantSeat === "K" ? "C" : "K";
 
+      // consider stale holders as free
+      const now = Date.now();
+      const wantFree  = !isValidPlayerId(seats[wantSeat]) || isSeatStale(seats, d.presence || {}, wantSeat, now);
+      const otherMine = seats[other] === myId;
+
+      // already mine?
       if (seats[wantSeat] === myId) return wantSeat;
 
-      if (!isValidPlayerId(seats[wantSeat])) {
-        if (seats[other] === myId) seats[other] = "";
+      if (wantFree) {
+        if (otherMine) seats[other] = "";
         seats[wantSeat] = myId;
         tx.update(roomRef, { seats });
         return wantSeat;
@@ -1381,6 +1416,7 @@ async function claimSeat(wantSeat) {
       seat = result;
       setSeatLabel(seat);
       refreshSeatButtons();
+      updateTurnControls();
       toast(`You are now ${nameOf(seat)}!`);
       startPresenceHeartbeat();
     } else {
@@ -1442,23 +1478,27 @@ async function ensureRoom(){
         racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
         pickedBy: {A:null, B:null},
         odds: null,
-        presence: {}
+        presence: {},
+        chat: []
       });
     }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
   }
 
-  // Claim a seat if possible
+  // Claim a seat if possible (honor staleness)
   try{
     const claim = await window.firebaseRunTransaction(db, async (tx)=>{
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
       const seats = { ...(d.seats || {K:"", C:""}) };
+      const presence = d.presence || {};
+      const now = Date.now();
 
+      // Do I already own a seat?
       if (seats.K === myId) return "K";
       if (seats.C === myId) return "C";
 
-      const Kfree = !isValidPlayerId(seats.K);
-      const Cfree = !isValidPlayerId(seats.C);
+      const Kfree = !isValidPlayerId(seats.K) || isSeatStale(seats, presence, 'K', now);
+      const Cfree = !isValidPlayerId(seats.C) || isSeatStale(seats, presence, 'C', now);
       let pick = "Solo";
 
       if (Kfree && Cfree){
@@ -1479,6 +1519,7 @@ async function ensureRoom(){
     setSeatLabel(seat); 
     seatPill.title = `Room: ${roomId}`;
     refreshSeatButtons();
+    updateTurnControls();
     if (seat === "K" || seat === "C") startPresenceHeartbeat();
   }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
 
@@ -1490,10 +1531,10 @@ async function ensureRoom(){
     // If we lost our seat
     const myIdNow = getPlayerId();
     if (seat !== "Solo") {
-      if (seat === "K" && D.seats?.K !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
-      if (seat === "C" && D.seats?.C !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
+      if (seat === "K" && D.seats?.K !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); updateTurnControls(); }
+      if (seat === "C" && D.seats?.C !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); updateTurnControls(); }
     }
-    updateSeatButtonsDisable(D.seats || {K:"", C:""});
+    updateSeatButtonsDisable(D.seats || {K:"", C:""}, D.presence || {});
 
     // >>> Ready pill update (compact, non-crowding)
     const both = updateReadyPill(D.seats || {K:"",C:""}, D.presence || {});
@@ -1576,6 +1617,7 @@ async function ensureRoom(){
     }
 
     refreshSeatButtons();
+    updateTurnControls();
   }, (err)=>{ console.error("[DL] room snapshot error:", err); showError("Lost connection. Reload the page."); });
 
   return roomRef;
@@ -1621,6 +1663,7 @@ async function copyInvite(){
   startBlinking();
   ensureReadyPill();
   ensureChatUI(); // create once (hidden until needed)
+  updateTurnControls();
 
   // Sofa art if present
   const img = new Image();
@@ -1647,4 +1690,5 @@ async function copyInvite(){
   await ensureRoom();
 
   setLog("Welcome to the Diplomat's Lounge. Deal flights to start.");
+  updateTurnControls();
 })();
