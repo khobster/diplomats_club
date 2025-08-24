@@ -6,6 +6,16 @@ const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/fligh
 let db = null, roomId = null, seat = "Solo";
 let roomRef = null, unsubRoom = null;
 
+/* =================== Presence / Chat Config =================== */
+const PRESENCE_TTL   = 45 * 1000; // seat considered stale after 45s of no heartbeat
+const HEARTBEAT_MS   = 10 * 1000; // send heartbeat every 10s
+
+let _hbTimer = null;      // presence heartbeat interval
+let _bothReady = false;   // computed in updateJoinStatus
+let _hasInteracted = false; // first real user interaction (helps avoid previews)
+let _chatUnread = 0;
+let _lastChatSeenT = 0;
+
 /* -------- DOM helpers -------- */
 function byId(id){ return document.getElementById(id); }
 const setLog = (t)=> byId("log").textContent = t;
@@ -70,6 +80,48 @@ function getPlayerId(){
     return "player-" + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
   }
 }
+
+/* ====== Presence helpers ====== */
+function isSeatStale(seats, presence, which, now=Date.now()){
+  const pid = seats?.[which];
+  if(!isValidPlayerId(pid)) return true;
+  const p = presence?.[which];
+  const last = (p && typeof p.last === 'number') ? p.last : 0;
+  return (now - last) > PRESENCE_TTL;
+}
+function bothPlayersFresh(seats, presence){
+  const now = Date.now();
+  const freshK = isValidPlayerId(seats?.K) && !isSeatStale(seats, presence, 'K', now);
+  const freshC = isValidPlayerId(seats?.C) && !isSeatStale(seats, presence, 'C', now);
+  return freshK && freshC;
+}
+function startPresenceHeartbeat(){
+  stopPresenceHeartbeat();
+  if (seat !== "K" && seat !== "C") return;
+  const beat = async ()=>{
+    if (!roomRef) return;
+    try {
+      await window.firebaseUpdateDoc(roomRef, {
+        [`presence.${seat}`]: { pid: getPlayerId(), last: Date.now() }
+      });
+    } catch(e){ /* ignore */ }
+  };
+  beat();
+  _hbTimer = setInterval(beat, HEARTBEAT_MS);
+}
+function stopPresenceHeartbeat(){
+  if (_hbTimer){ clearInterval(_hbTimer); _hbTimer = null; }
+}
+
+/* ===== Tiny interaction gate (helps avoid link-previews claiming seats) ===== */
+function markInteracted(){
+  if (_hasInteracted) return;
+  _hasInteracted = true;
+  // Try auto-claim once on first interaction if I'm still Solo and there's a seat hint
+  if (seat === "Solo" && roomRef) tryAutoClaimOnInteract();
+}
+window.addEventListener('pointerdown', markInteracted, { once:true, capture:true });
+window.addEventListener('keydown', markInteracted, { once:true, capture:true });
 
 /* -------- Firebase init -------- */
 async function initFirebase(){
@@ -137,47 +189,64 @@ async function ensureRoom(){
         dealt:null, destPos:null,
         racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
         pickedBy: {A:null, B:null},
-        odds: null
+        odds: null,
+        presence: { K:null, C:null },
+        messages: []
       });
     }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
   }
 
-  // Claim a seat (respect identity + hint; don't overwrite someone else's)
+  // Try to claim a seat (considers presence staleness; won't override a fresh occupant)
   try{
     const claim = await window.firebaseRunTransaction(db, async (tx)=>{
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
       const seats = { ...(d.seats || {K:"", C:""}) };
+      const presence = d.presence || {K:null, C:null};
+      const now = Date.now();
 
-      // Do I already own a seat?
+      // Already own one?
       if (seats.K === myId) return "K";
       if (seats.C === myId) return "C";
 
-      const Kfree = !isValidPlayerId(seats.K);
-      const Cfree = !isValidPlayerId(seats.C);
+      const Kstale = isSeatStale(seats, presence, 'K', now);
+      const Cstale = isSeatStale(seats, presence, 'C', now);
       let pick = "Solo";
 
-      if (Kfree && Cfree){
-        // both open → try hint, else default K
-        const pref = (seatHint === "K" || seatHint === "C") ? seatHint : "K";
-        seats[pref] = myId;
-        pick = pref;
-      }else if (Kfree){
-        seats.K = myId; pick = "K";
-      }else if (Cfree){
-        seats.C = myId; pick = "C";
+      if (Kstale && Cstale){
+        // both open/stale → try hint, else default K — but only after first interaction
+        if (_hasInteracted) {
+          const pref = (seatHint === "K" || seatHint === "C") ? seatHint : "K";
+          seats[pref] = myId;
+          tx.update(roomRef, { seats, [`presence.${pref}`]: { pid: myId, last: now } });
+          pick = pref;
+        } else {
+          pick = "Solo";
+        }
+      }else if (Kstale){
+        if (_hasInteracted) {
+          seats.K = myId; 
+          tx.update(roomRef, { seats, "presence.K": { pid: myId, last: now } });
+          pick = "K";
+        } else pick = "Solo";
+      }else if (Cstale){
+        if (_hasInteracted) {
+          seats.C = myId; 
+          tx.update(roomRef, { seats, "presence.C": { pid: myId, last: now } });
+          pick = "C";
+        } else pick = "Solo";
       }else{
-        // both taken by others
+        // both fresh, taken by others
         pick = "Solo";
       }
 
-      if (pick !== "Solo") tx.update(roomRef, { seats });
       return pick;
     });
     seat = claim; 
     setSeatLabel(seat); 
     seatPill.title = `Room: ${roomId}`;
-    refreshSeatButtons(); // update visibility immediately
+    refreshSeatButtons();
+    if (seat === "K" || seat === "C") startPresenceHeartbeat();
   }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
 
   // Live listener
@@ -188,11 +257,16 @@ async function ensureRoom(){
     // If we lost our seat (someone else claimed), drop to Solo
     const myIdNow = getPlayerId();
     if (seat !== "Solo") {
-      if (seat === "K" && D.seats?.K !== myIdNow){ seat = "Solo"; setSeatLabel(seat); }
-      if (seat === "C" && D.seats?.C !== myIdNow){ seat = "Solo"; setSeatLabel(seat); }
+      if (seat === "K" && D.seats?.K !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
+      if (seat === "C" && D.seats?.C !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
     }
-    // Also update button disable state by live seat availability
-    updateSeatButtonsDisable(D.seats || {K:"", C:""});
+
+    // UI states that depend on live presence
+    updateSeatButtonsDisable(D.seats || {K:"", C:""}, D.presence || {K:null, C:null});
+    const both = bothPlayersFresh(D.seats, D.presence);
+    updateJoinStatus(D.seats || {K:"", C:""}, D.presence || {K:null, C:null});
+    _bothReady = both;
+    updateChatVisibility(both);
 
     const wasRacing = S.racing;
     const oldChosen = S.chosen;
@@ -262,10 +336,51 @@ async function ensureRoom(){
       setLog("Deal flights to start.");
     }
 
+    // Chat render last — so unread logic sees most recent list
+    renderChat(D.messages || []);
+
     refreshSeatButtons(); // show/hide by my current seat
   }, (err)=>{ console.error("[DL] room snapshot error:", err); showError("Lost connection. Reload the page."); });
 
   return roomRef;
+}
+
+/* Claim if user interacts after landing on Solo (respects staleness) */
+async function tryAutoClaimOnInteract(){
+  if (!roomRef) return;
+  const myId = getPlayerId();
+  const seatHint = getSeatHint();
+  try{
+    const result = await window.firebaseRunTransaction(db, async (tx)=>{
+      const snap = await tx.get(roomRef);
+      const d = snap.data() || {};
+      const seats = {...(d.seats || {K:"", C:""})};
+      const presence = d.presence || {K:null, C:null};
+      const now = Date.now();
+
+      // do nothing if I already own one
+      if (seats.K === myId) return "K";
+      if (seats.C === myId) return "C";
+
+      const Kstale = isSeatStale(seats, presence, 'K', now);
+      const Cstale = isSeatStale(seats, presence, 'C', now);
+
+      if (Kstale && Cstale){
+        const pref = (seatHint === "K" || seatHint === "C") ? seatHint : "K";
+        seats[pref] = myId;
+        tx.update(roomRef, { seats, [`presence.${pref}`]: { pid: myId, last: now } });
+        return pref;
+      } else if (Kstale){
+        seats.K = myId; tx.update(roomRef, { seats, "presence.K": { pid: myId, last: now } }); return "K";
+      } else if (Cstale){
+        seats.C = myId; tx.update(roomRef, { seats, "presence.C": { pid: myId, last: now } }); return "C";
+      }
+      return "Solo";
+    });
+    if (result === "K" || result === "C"){
+      seat = result; setSeatLabel(seat); refreshSeatButtons(); startPresenceHeartbeat(); toast(`You are now ${nameOf(seat)}!`);
+    }
+  }catch(e){ console.warn("[DL] tryAutoClaimOnInteract failed:", e); }
 }
 
 async function createRoom(){
@@ -281,7 +396,9 @@ async function createRoom(){
       dealt:null, destPos:null,
       racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
       pickedBy: {A:null, B:null},
-      odds: null
+      odds: null,
+      presence: { K:null, C:null },
+      messages: []
     });
     // Host link: prefer K (host is "Cajun")
     const u = new URL(currentUrlWithRoom(id));
@@ -790,8 +907,10 @@ function startRaceAnimation(){
         S._lastBannerUpdate = now;
 
         // Landing detection: ONLY when interpolation finished AND within threshold
-        const landedA = (remSegA <= 0.01 || tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
-        const landedB = (remSegB <= 0.01 || tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
+        const { rem: remSegA2, t: tA2 } = segRemaining('A', now);
+        const { rem: remSegB2, t: tB2 } = segRemaining('B', now);
+        const landedA = (remSegA2 <= 0.01 || tA2 >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
+        const landedB = (remSegB2 <= 0.01 || tB2 >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
 
         if (!S._landed.A && landedA) {
           S._landed.A = true;
@@ -1308,15 +1427,16 @@ function refreshSeatButtons(){
   const ui = ensureSeatButtons();
   ui.box.style.display = (seat === "Solo") ? "flex" : "none";
 }
-function updateSeatButtonsDisable(seats){
+function updateSeatButtonsDisable(seats, presence){
   const ui = ensureSeatButtons();
   if (seat !== "Solo"){ ui.box.style.display = "none"; return; }
-  const kTaken = isValidPlayerId(seats.K);
-  const cTaken = isValidPlayerId(seats.C);
-  ui.cajunBtn.disabled = !!kTaken;
-  ui.kessBtn.disabled  = !!cTaken;
-  ui.cajunBtn.style.opacity = kTaken ? "0.5" : "1";
-  ui.kessBtn.style.opacity  = cTaken ? "0.5" : "1";
+  const now = Date.now();
+  const kFreshTaken = isValidPlayerId(seats.K) && !isSeatStale(seats, presence, 'K', now);
+  const cFreshTaken = isValidPlayerId(seats.C) && !isSeatStale(seats, presence, 'C', now);
+  ui.cajunBtn.disabled = !!kFreshTaken;
+  ui.kessBtn.disabled  = !!cFreshTaken;
+  ui.cajunBtn.style.opacity = kFreshTaken ? "0.5" : "1";
+  ui.kessBtn.style.opacity  = cFreshTaken ? "0.5" : "1";
 }
 async function claimSeat(wantSeat) {
   if (!roomRef) return;
@@ -1326,25 +1446,31 @@ async function claimSeat(wantSeat) {
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
       const seats = {...(d.seats || { K:"", C:"" })};
+      const presence = d.presence || {K:null, C:null};
       const other = wantSeat === "K" ? "C" : "K";
+      const now = Date.now();
 
       // already mine?
       if (seats[wantSeat] === myId) return wantSeat;
 
-      // target seat free/invalid? take it; and release my other if I had it
-      if (!isValidPlayerId(seats[wantSeat])) {
+      // target seat free/STALE? take it; and release my other if I had it
+      const targetStale = isSeatStale(seats, presence, wantSeat, now);
+      if (targetStale) {
         if (seats[other] === myId) seats[other] = "";
         seats[wantSeat] = myId;
-        tx.update(roomRef, { seats });
+        const updates = { seats };
+        updates[`presence.${wantSeat}`] = { pid: myId, last: now };
+        tx.update(roomRef, updates);
         return wantSeat;
       }
-      return "Solo"; // taken by someone else
+      return "Solo"; // taken by a fresh occupant
     });
 
     if (result === "K" || result === "C") {
       seat = result;
       setSeatLabel(seat);
       refreshSeatButtons();
+      startPresenceHeartbeat();
       toast(`You are now ${nameOf(seat)}!`);
     } else {
       toast("That seat is taken.");
@@ -1352,6 +1478,158 @@ async function claimSeat(wantSeat) {
   } catch (e) {
     console.error("[DL] Seat claim failed:", e);
     showError("Seat claim failed.");
+  }
+}
+
+/* =================== UX: Two-players joined indicator =================== */
+let _joinUI = null;
+function ensureJoinStatusUI(){
+  if (_joinUI) return _joinUI;
+  const el = document.createElement('div');
+  el.id = 'joinStatus';
+  el.style.cssText = `
+    position: fixed; top: 12px; left: 12px; z-index: 1000;
+    display: inline-flex; gap: 8px; align-items: center;
+    padding: 6px 10px; border-radius: 999px; font-weight: 700;
+    background: rgba(255,255,255,0.9); box-shadow: 0 2px 8px rgba(0,0,0,.08);
+  `;
+  el.innerHTML = `
+    <span id="joinDot" style="width:10px;height:10px;border-radius:50%;background:#f59e0b;display:inline-block"></span>
+    <span id="joinText">Waiting for players…</span>
+  `;
+  document.body.appendChild(el);
+  _joinUI = { root: el, dot: el.querySelector('#joinDot'), text: el.querySelector('#joinText') };
+  return _joinUI;
+}
+function updateJoinStatus(seats, presence){
+  const ui = ensureJoinStatusUI();
+  const now = Date.now();
+
+  const staleK = isSeatStale(seats, presence, 'K', now);
+  const staleC = isSeatStale(seats, presence, 'C', now);
+
+  const freshK = isValidPlayerId(seats?.K) && !staleK;
+  const freshC = isValidPlayerId(seats?.C) && !staleC;
+  const both = freshK && freshC;
+
+  ui.dot.style.background = both ? '#22c55e' : '#f59e0b';
+  ui.text.textContent = both
+    ? 'Both players ready'
+    : (freshK || freshC ? 'Waiting for second player…' : 'Waiting for players…');
+
+  return both;
+}
+
+/* =================== Simple in-room chat =================== */
+let _chat = null;
+function ensureChatUI(){
+  if (_chat) return _chat;
+  const box = document.createElement('div');
+  box.id = 'chat';
+  box.style.cssText = `
+    position: fixed; right: 14px; bottom: 14px; z-index: 1000; width: 320px;
+    background: rgba(255,255,255,0.95); border-radius: 12px; box-shadow: 0 6px 18px rgba(0,0,0,.12);
+    display: none; flex-direction: column; overflow: hidden;`;
+  box.innerHTML = `
+    <div style="padding:8px 10px;font-weight:800;border-bottom:1px solid #eee;display:flex;align-items:center;gap:8px">
+      <span>Chat</span>
+      <span id="chatUnreadDot" style="display:none;width:8px;height:8px;border-radius:50%;background:#ef4444;margin-left:auto"></span>
+    </div>
+    <div id="chatList" style="padding:8px 10px; height: 180px; overflow-y: auto; display:flex; flex-direction:column; gap:6px;"></div>
+    <div style="display:flex; gap:6px; padding:8px 10px; border-top:1px solid #eee">
+      <input id="chatInput" type="text" placeholder="Type a message…" style="flex:1; padding:8px 10px; border-radius:8px; border:1px solid #ddd;"/>
+      <button id="chatSend" style="padding:8px 12px; border:0; border-radius:8px; font-weight:700; cursor:pointer;">Send</button>
+    </div>`;
+  document.body.appendChild(box);
+  const list = box.querySelector('#chatList');
+  const input = box.querySelector('#chatInput');
+  const sendBtn = box.querySelector('#chatSend');
+  const unreadDot = box.querySelector('#chatUnreadDot');
+
+  function sendNow(){
+    const t = input.value.trim();
+    if (t){ sendChat(t); input.value=''; hideUnread(); }
+  }
+  sendBtn.addEventListener('click', sendNow);
+  input.addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter'){
+      e.preventDefault();
+      sendNow();
+    }
+  });
+
+  function hideUnread(){ _chatUnread = 0; unreadDot.style.display='none'; _lastChatSeenT = Date.now(); }
+  function maybeUnreadBurst(latestMessage){
+    const me = getPlayerId();
+    // unread if: message not mine, and tab hidden or not focused
+    if (latestMessage && latestMessage.pid !== me && (document.hidden || !document.hasFocus())){
+      _chatUnread++;
+      unreadDot.style.display = 'inline-block';
+    }
+  }
+
+  window.addEventListener('visibilitychange', ()=>{
+    if (!document.hidden) hideUnread();
+  });
+  window.addEventListener('focus', hideUnread);
+
+  _chat = { box, list, input, sendBtn, unreadDot, hideUnread, maybeUnreadBurst };
+  return _chat;
+}
+function updateChatVisibility(show){
+  const ui = ensureChatUI();
+  ui.box.style.display = show ? 'flex' : 'none';
+}
+function renderChat(messages){
+  const ui = ensureChatUI();
+  if (!Array.isArray(messages)) messages = [];
+  ui.list.innerHTML = '';
+  const me = getPlayerId();
+  let lastMsg = null;
+
+  messages.forEach(m=>{
+    lastMsg = m;
+    const row = document.createElement('div');
+    row.style.cssText = `display:flex;`;
+    const bubble = document.createElement('div');
+    const mine = m.pid === me;
+    bubble.style.cssText = `
+      max-width: 70%; padding:6px 10px; border-radius:12px;
+      ${mine ? 'margin-left:auto;background:#DCFCE7;' : 'margin-right:auto;background:#E5E7EB;'}
+      font-size:14px; line-height:1.2;`;
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:11px; opacity:.7; margin-bottom:2px;';
+    const when = new Date(m.t||Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    label.textContent = `${nameOf(m.seat||'')} • ${when}`;
+    const text = document.createElement('div');
+    text.textContent = m.text || '';
+    bubble.appendChild(label);
+    bubble.appendChild(text);
+    row.appendChild(bubble);
+    ui.list.appendChild(row);
+  });
+  ui.list.scrollTop = ui.list.scrollHeight;
+
+  // unread indicator if new message arrived while hidden/not focused
+  if (messages.length){
+    ui.maybeUnreadBurst(lastMsg);
+  }
+}
+async function sendChat(text){
+  if (!roomRef) return;
+  const myId = getPlayerId();
+  const mySeat = seat;
+  const clean = text.slice(0, 500); // soft limit
+  try{
+    await window.firebaseRunTransaction(db, async (tx)=>{
+      const snap = await tx.get(roomRef);
+      const d = snap.data() || {};
+      let messages = Array.isArray(d.messages) ? d.messages.slice(-49) : [];
+      messages.push({ t: Date.now(), pid: myId, seat: (mySeat==='K'||mySeat==='C') ? mySeat : null, text: clean });
+      tx.update(roomRef, { messages });
+    });
+  }catch(e){
+    console.warn("[DL] sendChat failed:", e);
   }
 }
 
@@ -1376,11 +1654,17 @@ resetBtn.addEventListener("click", async ()=>{
 newRoomBtn.addEventListener("click", createRoom);
 copyBtn.addEventListener("click", copyInvite);
 
+window.addEventListener('beforeunload', ()=>{ stopPresenceHeartbeat(); });
+
 /* =================== Init =================== */
 (async function init(){
   setSeatLabel(seat);
   updateHUD();
   startBlinking();
+  ensureSeatButtons(); // create once
+  refreshSeatButtons(); // initial state
+  ensureJoinStatusUI(); // create status pill
+  ensureChatUI();       // create chat box (hidden until both ready)
 
   // Load sofa art if present
   const img = new Image();
@@ -1399,9 +1683,6 @@ copyBtn.addEventListener("click", copyInvite);
   };
   img.onerror = function() { console.warn("[DL] Could not load sofa image, using placeholder"); };
   img.src = "./sofawithkesslerandcajun.png";
-
-  ensureSeatButtons(); // create once
-  refreshSeatButtons(); // initial state
 
   await initFirebase();
   await ensureRoom();
