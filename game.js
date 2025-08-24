@@ -6,16 +6,6 @@ const LIVE_PROXY = "https://qw5l10c7a4.execute-api.us-east-1.amazonaws.com/fligh
 let db = null, roomId = null, seat = "Solo";
 let roomRef = null, unsubRoom = null;
 
-/* =================== Presence / Chat Config =================== */
-const PRESENCE_TTL   = 45 * 1000; // seat considered stale after 45s of no heartbeat
-const HEARTBEAT_MS   = 10 * 1000; // send heartbeat every 10s
-
-let _hbTimer = null;      // presence heartbeat interval
-let _bothReady = false;   // computed in updateJoinStatus
-let _hasInteracted = false; // first real user interaction (helps avoid previews)
-let _chatUnread = 0;
-let _lastChatSeenT = 0;
-
 /* -------- DOM helpers -------- */
 function byId(id){ return document.getElementById(id); }
 const setLog = (t)=> byId("log").textContent = t;
@@ -81,48 +71,6 @@ function getPlayerId(){
   }
 }
 
-/* ====== Presence helpers ====== */
-function isSeatStale(seats, presence, which, now=Date.now()){
-  const pid = seats?.[which];
-  if(!isValidPlayerId(pid)) return true;
-  const p = presence?.[which];
-  const last = (p && typeof p.last === 'number') ? p.last : 0;
-  return (now - last) > PRESENCE_TTL;
-}
-function bothPlayersFresh(seats, presence){
-  const now = Date.now();
-  const freshK = isValidPlayerId(seats?.K) && !isSeatStale(seats, presence, 'K', now);
-  const freshC = isValidPlayerId(seats?.C) && !isSeatStale(seats, presence, 'C', now);
-  return freshK && freshC;
-}
-function startPresenceHeartbeat(){
-  stopPresenceHeartbeat();
-  if (seat !== "K" && seat !== "C") return;
-  const beat = async ()=>{
-    if (!roomRef) return;
-    try {
-      await window.firebaseUpdateDoc(roomRef, {
-        [`presence.${seat}`]: { pid: getPlayerId(), last: Date.now() }
-      });
-    } catch(e){ /* ignore */ }
-  };
-  beat();
-  _hbTimer = setInterval(beat, HEARTBEAT_MS);
-}
-function stopPresenceHeartbeat(){
-  if (_hbTimer){ clearInterval(_hbTimer); _hbTimer = null; }
-}
-
-/* ===== Tiny interaction gate (helps avoid link-previews claiming seats) ===== */
-function markInteracted(){
-  if (_hasInteracted) return;
-  _hasInteracted = true;
-  // Try auto-claim once on first interaction if I'm still Solo and there's a seat hint
-  if (seat === "Solo" && roomRef) tryAutoClaimOnInteract();
-}
-window.addEventListener('pointerdown', markInteracted, { once:true, capture:true });
-window.addEventListener('keydown', markInteracted, { once:true, capture:true });
-
 /* -------- Firebase init -------- */
 async function initFirebase(){
   let attempts = 0;
@@ -162,259 +110,229 @@ function buildInviteUrl(id){
   return u.toString();
 }
 
-async function ensureRoom(){
-  if(!db){ const ok = await initFirebase(); if(!ok) return null; }
+/* =================== Presence (readiness) =================== */
+const PRESENCE_BEAT_MS = 10 * 1000;
+const PRESENCE_TTL = 120 * 1000; // more forgiving than 45s
+let _presenceTimer = null;
 
-  const url = new URL(location.href);
-  roomId = url.searchParams.get("room");
-  if(!roomId) return null;
-
-  roomRef = window.firebaseDoc(db, "rooms", roomId);
-
-  const myId = getPlayerId();
-  const seatHint = getSeatHint();
-
-  // Get or create
-  let snap;
-  try{ snap = await window.firebaseGetDoc(roomRef); } 
-  catch(e){ console.error("[DL] room get failed:", e); showError("Failed to get room."); return null; }
-
-  if(!snap || !snap.exists()){
-    try{
-      await window.firebaseSetDoc(roomRef, {
-        createdAt: Date.now(),
-        seats: {K:"", C:""},
-        bank: {K:0, C:0},
-        airport:"JFK", bet:50, live:true,
-        dealt:null, destPos:null,
-        racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
-        pickedBy: {A:null, B:null},
-        odds: null,
-        presence: { K:null, C:null },
-        messages: []
-      });
-    }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
+function isSeatStale(seats, presence, which, now = Date.now()){
+  const pid = seats?.[which];
+  if (!isValidPlayerId(pid)) return true;
+  const p = presence?.[which];
+  if (!p || p.pid !== pid) return true;
+  return (now - (p.last || 0)) > PRESENCE_TTL;
+}
+function startPresenceHeartbeat(){
+  stopPresenceHeartbeat();
+  if (!roomRef) return;
+  if (seat !== "K" && seat !== "C") return;
+  const beat = ()=>{
+    window.firebaseUpdateDoc(roomRef, {
+      [`presence.${seat}`]: { pid: getPlayerId(), last: Date.now() }
+    }).catch(()=>{});
+  };
+  beat();
+  _presenceTimer = setInterval(beat, PRESENCE_BEAT_MS);
+}
+function stopPresenceHeartbeat(){
+  if (_presenceTimer){ clearInterval(_presenceTimer); _presenceTimer = null; }
+}
+window.addEventListener('visibilitychange', ()=>{
+  if (!roomRef) return;
+  if (seat === "K" || seat === "C"){
+    window.firebaseUpdateDoc(roomRef, { [`presence.${seat}`]: { pid: getPlayerId(), last: Date.now() } }).catch(()=>{});
+    if (!document.hidden) startPresenceHeartbeat();
   }
+});
+window.addEventListener('focus', ()=>{
+  if (!roomRef) return;
+  if (seat === "K" || seat === "C"){
+    window.firebaseUpdateDoc(roomRef, { [`presence.${seat}`]: { pid: getPlayerId(), last: Date.now() } }).catch(()=>{});
+  }
+});
 
-  // Try to claim a seat (considers presence staleness; won't override a fresh occupant)
-  try{
-    const claim = await window.firebaseRunTransaction(db, async (tx)=>{
-      const dSnap = await tx.get(roomRef);
-      const d = dSnap.data() || {};
-      const seats = { ...(d.seats || {K:"", C:""}) };
-      const presence = d.presence || {K:null, C:null};
-      const now = Date.now();
-
-      // Already own one?
-      if (seats.K === myId) return "K";
-      if (seats.C === myId) return "C";
-
-      const Kstale = isSeatStale(seats, presence, 'K', now);
-      const Cstale = isSeatStale(seats, presence, 'C', now);
-      let pick = "Solo";
-
-      if (Kstale && Cstale){
-        // both open/stale → try hint, else default K — but only after first interaction
-        if (_hasInteracted) {
-          const pref = (seatHint === "K" || seatHint === "C") ? seatHint : "K";
-          seats[pref] = myId;
-          tx.update(roomRef, { seats, [`presence.${pref}`]: { pid: myId, last: now } });
-          pick = pref;
-        } else {
-          pick = "Solo";
-        }
-      }else if (Kstale){
-        if (_hasInteracted) {
-          seats.K = myId; 
-          tx.update(roomRef, { seats, "presence.K": { pid: myId, last: now } });
-          pick = "K";
-        } else pick = "Solo";
-      }else if (Cstale){
-        if (_hasInteracted) {
-          seats.C = myId; 
-          tx.update(roomRef, { seats, "presence.C": { pid: myId, last: now } });
-          pick = "C";
-        } else pick = "Solo";
-      }else{
-        // both fresh, taken by others
-        pick = "Solo";
-      }
-
-      return pick;
-    });
-    seat = claim; 
-    setSeatLabel(seat); 
-    seatPill.title = `Room: ${roomId}`;
-    refreshSeatButtons();
-    if (seat === "K" || seat === "C") startPresenceHeartbeat();
-  }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
-
-  // Live listener
-  if (unsubRoom) unsubRoom();
-  unsubRoom = window.firebaseOnSnapshot(roomRef, (doc)=>{
-    const D = doc.data(); if(!D) return;
-
-    // If we lost our seat (someone else claimed), drop to Solo
-    const myIdNow = getPlayerId();
-    if (seat !== "Solo") {
-      if (seat === "K" && D.seats?.K !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
-      if (seat === "C" && D.seats?.C !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
-    }
-
-    // UI states that depend on live presence
-    updateSeatButtonsDisable(D.seats || {K:"", C:""}, D.presence || {K:null, C:null});
-    const both = bothPlayersFresh(D.seats, D.presence);
-    updateJoinStatus(D.seats || {K:"", C:""}, D.presence || {K:null, C:null});
-    _bothReady = both;
-    updateChatVisibility(both);
-
-    const wasRacing = S.racing;
-    const oldChosen = S.chosen;
-    const oldRaceStartTime = S.raceStartTime;
-
-    // Merge
-    S.bank = {...D.bank};
-    S.airport = D.airport;
-    S.bet = D.bet;
-    S.live = true;
-    S.dealt = D.dealt ? {...D.dealt} : null;
-    S.destPos = D.destPos || null;
-    S.racing = D.racing;
-    S.turn = D.turn;
-    S.chosen = D.chosen;
-    S.roundSeed = D.roundSeed;
-    S.lastWinner = D.lastWinner;
-    S.raceStartTime = D.raceStartTime || null;
-    S.pickedBy = D.pickedBy || {A:null, B:null};
-    S.odds = D.odds || null;
-
-    updateHUD();
-    if(S.dealt) renderDealt();
-
-    // Detect cross-client race starts / choice flips
-    const raceJustStarted = S.racing && (!wasRacing || S.raceStartTime !== oldRaceStartTime);
-    const choiceChanged = S.racing && S.chosen !== oldChosen;
-    
-    if(raceJustStarted || choiceChanged){
-      // Reset animation state for a fresh start
-      S.etaBaseline = { A: S.dealt?.A?.etaMinutes ?? 0, B: S.dealt?.B?.etaMinutes ?? 0 };
-      S.etaBaselineTime = S.raceStartTime || Date.now();
-      S._stableLeader = null; 
-      S._leaderLockUntil = 0; 
-      S._lastBannerUpdate = 0;
-      S._landed = {A:false, B:false};
-      S._animationRunning = false;
-
-      // Initialize segments with current positions
-      ['A','B'].forEach(k=>{
-        const f = S.dealt[k];
-        if(f){
-          let startPos;
-          if (f?.pos?.lat != null && (f.pos.lng ?? f.pos.lon) != null){
-            startPos = [f.pos.lat, (f.pos.lng ?? f.pos.lon)];
-          } else {
-            startPos = guessPos(f);
-          }
-          anchorSegment(k, startPos, f.etaMinutes, S.raceStartTime || Date.now());
-        }
-      });
-      
-      const turnPlayer = nameOf(S.turn);
-      const oppPlayer  = nameOf(S.turn === "K" ? "C" : "K");
-      const oppChoice = S.chosen === 'A' ? 'B' : 'A';
-      setLog(`${turnPlayer} picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${S.odds && S.odds[S.odds.long] ? ` (longshot pays ${S.odds.mult.toFixed(2)}×)` : ""}!`);
-      startRaceAnimation();
-    }else if(S.racing && wasRacing){
-      // Ensure animation is running, but don't duplicate
-      if(!S._animationRunning){
-        startRaceAnimation();
-      }
-    }else if(S.dealt && !S.racing){
-      if(S.turn === seat) setLog("Your turn! Pick flight A or B. Your opponent gets the other one.");
-      else setLog(`Waiting for ${nameOf(S.turn)} to pick a flight...`);
-    }else{
-      setLog("Deal flights to start.");
-    }
-
-    // Chat render last — so unread logic sees most recent list
-    renderChat(D.messages || []);
-
-    refreshSeatButtons(); // show/hide by my current seat
-  }, (err)=>{ console.error("[DL] room snapshot error:", err); showError("Lost connection. Reload the page."); });
-
-  return roomRef;
+/* Compact "Ready" pill (won't crowd header) */
+function ensureReadyPill(){
+  let pill = byId('readyPill');
+  if (pill) return pill;
+  pill = document.createElement('div');
+  pill.id = 'readyPill';
+  pill.style.cssText = `
+    position: fixed; top: 10px; right: 12px; z-index: 901;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(255,255,255,0.92); border-radius: 999px;
+    padding: 4px 10px; box-shadow: 0 2px 10px rgba(0,0,0,.12);
+    font: 600 12px/1.2 ui-sans-serif, system-ui, -apple-system;`;
+  pill.innerHTML = `
+    <span id="readyDot" style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>
+    <span id="readyText">Away</span>
+  `;
+  document.body.appendChild(pill);
+  return pill;
+}
+function updateReadyPill(seats, presence){
+  ensureReadyPill();
+  const dot = byId('readyDot'), txt = byId('readyText');
+  const now = Date.now();
+  const twoSeated = isValidPlayerId(seats?.K) && isValidPlayerId(seats?.C);
+  const freshK = !isSeatStale(seats, presence, 'K', now);
+  const freshC = !isSeatStale(seats, presence, 'C', now);
+  const bothReady = twoSeated && freshK && freshC;
+  if (dot) dot.style.background = bothReady ? '#16a34a' : '#f59e0b';
+  if (txt){
+    txt.textContent = bothReady ? 'Ready (2/2)' : twoSeated ? (freshK||freshC ? 'One away (1/2)' : 'Both away') : 'Waiting';
+    txt.title = bothReady ? 'Both players are ready' : 'Players not both ready';
+  }
+  return bothReady;
 }
 
-/* Claim if user interacts after landing on Solo (respects staleness) */
-async function tryAutoClaimOnInteract(){
-  if (!roomRef) return;
-  const myId = getPlayerId();
-  const seatHint = getSeatHint();
+/* =================== Chat (minimize + unread) =================== */
+let _chat = {
+  box: null, log: null, input: null, sendBtn: null, head: null,
+  minBtn: null, mini: null, unread: 0, everUnlocked: false, minimized: false,
+  lastReadTs: 0
+};
+function chatStorageKey(){ return `dl.chat.lastread.${roomId}.${getPlayerId()}`; }
+function ensureChatUI(){
+  if (_chat.box) return _chat;
+
+  const box = document.createElement('div');
+  box.id = 'chatBox';
+  box.style.cssText = `
+    position: fixed; right: 14px; bottom: 14px; z-index: 900;
+    width: 300px; max-height: 50vh; display: none; flex-direction: column;
+    background: rgba(255,255,255,0.97); border-radius: 12px; box-shadow: 0 10px 24px rgba(0,0,0,.18);`;
+
+  const head = document.createElement('div');
+  head.style.cssText = `display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #e5e7eb;`;
+  head.innerHTML = `<div style="font-weight:800;font-size:12px;display:flex;align-items:center;gap:6px">💬 Chat <span id="chatStatus" style="font-weight:700;font-size:11px;color:#9ca3af">(waiting)</span></div>`;
+  const minBtn = document.createElement('button');
+  minBtn.textContent = '–';
+  minBtn.title = 'Minimize';
+  minBtn.style.cssText = `border:0;background:transparent;font-weight:900;font-size:16px;cursor:pointer;line-height:1;padding:2px 6px;border-radius:8px;`;
+  head.appendChild(minBtn);
+
+  const log = document.createElement('div');
+  log.id = 'chatLog';
+  log.style.cssText = `overflow:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:120px;`;
+
+  const row = document.createElement('div');
+  row.style.cssText = `display:flex;gap:6px;padding:8px;`;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Type a message…';
+  input.style.cssText = `flex:1;border:1px solid #e5e7eb;border-radius:10px;padding:8px 10px;font-size:13px;`;
+  const sendBtn = document.createElement('button');
+  sendBtn.textContent = 'Send';
+  sendBtn.style.cssText = `border:0;border-radius:10px;padding:8px 10px;font-weight:800;background:#111827;color:#fff;cursor:pointer;`;
+  row.appendChild(input); row.appendChild(sendBtn);
+
+  box.appendChild(head); box.appendChild(log); box.appendChild(row);
+  document.body.appendChild(box);
+
+  // Mini pill when minimized
+  const mini = document.createElement('button');
+  mini.id = 'chatMini';
+  mini.style.cssText = `
+    position: fixed; right: 14px; bottom: 14px; z-index: 901;
+    display: none; align-items: center; gap: 8px; border: 0; cursor: pointer;
+    background: rgba(255,255,255,0.95); border-radius: 999px; padding: 8px 12px;
+    box-shadow: 0 10px 20px rgba(0,0,0,.16); font-weight: 900;`;
+  mini.innerHTML = `💬 Chat <span id="chatUnread" style="display:none;min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:11px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;"></span>`;
+  document.body.appendChild(mini);
+
+  minBtn.onclick = ()=> setChatMinimized(true);
+  mini.onclick   = ()=> setChatMinimized(false);
+  sendBtn.onclick = sendChat;
+  input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); sendChat(); } });
+
+  _chat = { box, log, input, sendBtn, head, minBtn, mini, unread:0, everUnlocked:false, minimized:false, lastReadTs: Number(localStorage.getItem(chatStorageKey())||0) };
+  return _chat;
+}
+function setChatMinimized(min){
+  const ui = ensureChatUI();
+  _chat.minimized = !!min;
+  ui.box.style.display = min ? 'none' : 'flex';
+  ui.mini.style.display = min ? 'inline-flex' : 'none';
+  if (!min) markChatRead();
+}
+function bumpUnread(){
+  _chat.unread++;
+  const badge = document.getElementById('chatUnread');
+  if (badge){ badge.style.display = 'inline-flex'; badge.textContent = String(_chat.unread); }
+}
+function resetUnread(){
+  _chat.unread = 0;
+  const badge = document.getElementById('chatUnread');
+  if (badge){ badge.style.display = 'none'; }
+}
+function markChatRead(){
+  // last message timestamp
+  const rows = _chat.log?.querySelectorAll('[data-ts]');
+  if (!rows || !rows.length) return;
+  const last = Number(rows[rows.length-1].dataset.ts || 0);
+  if (last > _chat.lastReadTs){
+    _chat.lastReadTs = last;
+    try{ localStorage.setItem(chatStorageKey(), String(last)); }catch{}
+  }
+  resetUnread();
+}
+function updateChatVisibility(both, seats){
+  const ui = ensureChatUI();
+  if (both) _chat.everUnlocked = true;
+  const someoneSeated = isValidPlayerId(seats?.K) || isValidPlayerId(seats?.C);
+  const show = _chat.everUnlocked || someoneSeated;
+  if (!_chat.minimized) ui.box.style.display = show ? 'flex' : 'none';
+  // keep mini pill if minimized & show==true
+  ui.mini.style.display = (_chat.minimized && show) ? 'inline-flex' : 'none';
+}
+
+/* render/send */
+function renderChat(messages = []){
+  ensureChatUI();
+  const me = getPlayerId();
+  const beforeScroll = _chat.log.scrollTop + _chat.log.clientHeight >= _chat.log.scrollHeight - 6;
+  _chat.log.innerHTML = '';
+  messages.forEach(m=>{
+    const row = document.createElement('div');
+    row.dataset.ts = m.ts || 0;
+    const mine = m.pid === me;
+    row.style.cssText = `align-self:${mine?'flex-end':'flex-start'};max-width:85%;padding:6px 10px;border-radius:12px;` +
+      `background:${mine?'#111827':'#e5e7eb'};color:${mine?'#fff':'#111827'};font-size:13px;font-weight:600;`;
+    row.textContent = m.text || '';
+    _chat.log.appendChild(row);
+  });
+  if (beforeScroll) _chat.log.scrollTop = _chat.log.scrollHeight;
+
+  // unread accounting
+  const newest = messages.length ? Number(messages[messages.length-1].ts || 0) : 0;
+  if (newest > _chat.lastReadTs){
+    const meVisible = !_chat.minimized && !document.hidden;
+    if (meVisible) {
+      markChatRead();
+    } else {
+      bumpUnread();
+    }
+  }
+}
+async function sendChat(){
+  if (!_chat.input || !roomRef) return;
+  const text = (_chat.input.value || '').trim();
+  if (!text) return;
+  _chat.input.value = '';
+
+  // Store messages as an array on the room (simple, two users)
   try{
-    const result = await window.firebaseRunTransaction(db, async (tx)=>{
+    await window.firebaseRunTransaction(db, async (tx)=>{
       const snap = await tx.get(roomRef);
       const d = snap.data() || {};
-      const seats = {...(d.seats || {K:"", C:""})};
-      const presence = d.presence || {K:null, C:null};
-      const now = Date.now();
-
-      // do nothing if I already own one
-      if (seats.K === myId) return "K";
-      if (seats.C === myId) return "C";
-
-      const Kstale = isSeatStale(seats, presence, 'K', now);
-      const Cstale = isSeatStale(seats, presence, 'C', now);
-
-      if (Kstale && Cstale){
-        const pref = (seatHint === "K" || seatHint === "C") ? seatHint : "K";
-        seats[pref] = myId;
-        tx.update(roomRef, { seats, [`presence.${pref}`]: { pid: myId, last: now } });
-        return pref;
-      } else if (Kstale){
-        seats.K = myId; tx.update(roomRef, { seats, "presence.K": { pid: myId, last: now } }); return "K";
-      } else if (Cstale){
-        seats.C = myId; tx.update(roomRef, { seats, "presence.C": { pid: myId, last: now } }); return "C";
-      }
-      return "Solo";
+      const arr = Array.isArray(d.chat) ? d.chat.slice(-99) : [];
+      arr.push({ text, ts: Date.now(), seat, pid: getPlayerId() });
+      tx.update(roomRef, { chat: arr });
     });
-    if (result === "K" || result === "C"){
-      seat = result; setSeatLabel(seat); refreshSeatButtons(); startPresenceHeartbeat(); toast(`You are now ${nameOf(seat)}!`);
-    }
-  }catch(e){ console.warn("[DL] tryAutoClaimOnInteract failed:", e); }
-}
-
-async function createRoom(){
-  if(!db){ const ok = await initFirebase(); if(!ok){ alert("Cannot create room."); return; } }
-  try{
-    const id = randomCode(6);
-    const newRoomRef = window.firebaseDoc(db, "rooms", id);
-    await window.firebaseSetDoc(newRoomRef, {
-      createdAt: Date.now(),
-      seats: {K:"", C:""},
-      bank: {K:0, C:0},
-      airport:"JFK", bet:50, live:true,
-      dealt:null, destPos:null,
-      racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
-      pickedBy: {A:null, B:null},
-      odds: null,
-      presence: { K:null, C:null },
-      messages: []
-    });
-    // Host link: prefer K (host is "Cajun")
-    const u = new URL(currentUrlWithRoom(id));
-    u.searchParams.set("seat","K");
-    history.replaceState(null, "", u.toString());
-    toast(`Room created: ${id}`);
-    await ensureRoom();
-  }catch(e){ console.error("[DL] createRoom error:", e); showError("Failed to create room."); }
-}
-
-async function copyInvite(){
-  if(!roomId) await createRoom();
-  if(!roomId) return;
-  const invite = buildInviteUrl(roomId);
-  try{ await navigator.clipboard.writeText(invite); toast("Invite link copied!"); }
-  catch(e){ console.error("[DL] clipboard error:", e); prompt("Copy this link:", invite); }
+  }catch(e){
+    console.warn("[DL] chat send failed", e);
+  }
 }
 
 /* =================== UI refs =================== */
@@ -475,21 +393,24 @@ const S = {
   _stableLeader: null,
   _leaderLockUntil: 0,
   _resolving: false,
-  _animationRunning: false,  // Track if animation is running
+  _animationRunning: false,
 
   // live update timing
   lastLiveUpdateAt: null,
   nextLiveUpdateAt: null,
   _liveIntervalId: null,
-  _liveTimeoutId: null,  // Track the first ping timeout
-  _liveFetchInFlight: false,  // Prevent overlapping fetches
+  _liveTimeoutId: null,
+  _liveFetchInFlight: false,
 
   // segment anchors + landed flags
   seg: {
     A: { startPos: null, startTime: 0, etaAtStart: 0 },
     B: { startPos: null, startTime: 0, etaAtStart: 0 }
   },
-  _landed: { A:false, B:false }
+  _landed: { A:false, B:false },
+
+  // map view control
+  _allowAutoFit: { A:true, B:true }
 };
 
 /* =================== Utilities =================== */
@@ -558,7 +479,6 @@ async function fetchJSON(url, timeoutMs=9000){
 
 /* ---------- Bearing + plane icon helpers (for Leaflet) ---------- */
 function bearingDeg(fromLatLng, toLatLng){
-  // returns degrees clockwise from North
   const toRad = (d)=>d*Math.PI/180, toDeg=(r)=>r*180/Math.PI;
   const [lat1,lon1] = [toRad(fromLatLng[0]), toRad(fromLatLng[1])];
   const [lat2,lon2] = [toRad(toLatLng[0]), toRad(toLatLng[1])];
@@ -567,7 +487,6 @@ function bearingDeg(fromLatLng, toLatLng){
   const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 }
-// small north-pointing SVG; we rotate it in a nested div so Leaflet’s translate is untouched
 function planeDivIcon(angleDeg=0, color="#1e90ff"){
   const svg = `
     <div class="plane-rot" style="transform: rotate(${Math.round(angleDeg)}deg)">
@@ -613,7 +532,6 @@ function showKapow(title, opts={}){
 /* =================== Connection Status =================== */
 let connectionFailures = 0;
 function updateConnectionStatus(success) {
-  // Header pill (preferred)
   const dot = byId('liveDot');
   const txt = byId('liveText');
 
@@ -629,7 +547,7 @@ function updateConnectionStatus(success) {
     }
   }
 
-  // Legacy corner badge fallback if header pill isn't present
+  // Legacy corner badge fallback
   let el = document.getElementById('connection-status');
   if (!byId('livePill')) {
     if (!el) {
@@ -682,38 +600,28 @@ async function updateLivePositions() {
 
       let changed = false;
 
-      // continuity-preserving rebase that keeps CURRENT SCREEN POSITION constant
       function rebase(which, updated){
         const f = S.dealt[which];
         const now = Date.now();
-
-        // Current on-screen point (do not move this)
         const P = segPos(which, now);
 
-        // Live anchor (recorded but not forced visually)
         const hasLive = !!(updated.pos && Number.isFinite(updated.pos.lat) && Number.isFinite(updated.pos.lng));
         if (hasLive) f.pos = { lat: updated.pos.lat, lng: updated.pos.lng };
 
-        // New ETA from API (minutes from *now* to landing)
         let apiETA = Number.isFinite(updated.etaMinutes) ? updated.etaMinutes : f.etaMinutes;
 
-        // Prevent "time being added": clamp to baseline-minus-elapsed (+tiny wiggle)
         const raceStart = S.raceStartTime || now;
-        const elapsedSinceRaceStart = (now - raceStart) / 60000; // minutes
-        const originalETA = S.etaBaseline[which] ?? f.etaMinutes; // baseline at start
+        const elapsedSinceRaceStart = (now - raceStart) / 60000;
+        const originalETA = S.etaBaseline[which] ?? f.etaMinutes;
         const expectedRemaining = Math.max(0, originalETA - elapsedSinceRaceStart);
         const MAX_UP_MIN = 2;
         const adjustedETA = Math.min(apiETA, expectedRemaining + MAX_UP_MIN);
 
-        // Re-anchor segment at current on-screen P with adjusted remaining ETA
         S.seg[which] = { startPos: [P[0], P[1]], startTime: now, etaAtStart: Math.max(0.01, adjustedETA) };
-
-        // Update stored ETA
         f.etaMinutes = adjustedETA;
 
-        // Move baseline only downward so banner clock can't add time
         if (S.etaBaselineTime == null) S.etaBaselineTime = raceStart;
-        const delta = expectedRemaining - adjustedETA; // positive if we shortened
+        const delta = expectedRemaining - adjustedETA;
         if (delta > 0) {
           S.etaBaseline[which] = (S.etaBaseline[which] ?? originalETA) - delta;
         }
@@ -725,12 +633,12 @@ async function updateLivePositions() {
       if (updatedB) rebase('B', updatedB);
 
       if(changed) {
-        renderDealt();
+        renderDealt(/*noFit*/ true); // don't force fit on live bumps
       }
       
       updateConnectionStatus(true);
       S._liveFetchInFlight = false;
-      break; // success
+      break;
       
     } catch(e) {
       attempts++;
@@ -787,11 +695,11 @@ function startRaceAnimation(){
     S._stableLeader = null; S._leaderLockUntil = 0; S._lastBannerUpdate = 0;
   }
 
-  // Clear any existing timers to prevent duplicates
+  // Clear any existing timers
   if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
   if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
   
-  // Set up new timers
+  // Set up live timers
   S._liveTimeoutId = setTimeout(()=>{ 
     S._liveTimeoutId = null;
     if(S.racing) updateLivePositions(); 
@@ -836,36 +744,30 @@ function startRaceAnimation(){
       }
     }
 
-    // --- 1 Hz banner + ETA/miles (tied to segment progress) ---
+    // --- 1 Hz banner + ETA/miles ---
     if (REAL_TIME_RACING && S.racing) {
       if (now - S._lastBannerUpdate >= 1000) {
         const baseTime = S.etaBaselineTime || S.raceStartTime || now;
         const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
 
-        // Baseline countdown from live clock
         const clockA = Math.max(0, (S.etaBaseline.A ?? 0) - elapsedMinSinceBase);
         const clockB = Math.max(0, (S.etaBaseline.B ?? 0) - elapsedMinSinceBase);
 
-        // Segment-based remaining from the animation anchors
         const segA = segRemaining('A', now);
         const segB = segRemaining('B', now);
 
-        // What we *show* = can't beat the dot's progress
         const showA = Math.max(segA.rem, clockA);
         const showB = Math.max(segB.rem, clockB);
 
-        // Current positions and distances to dest
         const [dlat, dlng] = destLatLng();
         const [alat, alng] = segPos('A', now);
         const [blat, blng] = segPos('B', now);
         const distA = milesBetween(alat, alng, dlat, dlng);
         const distB = milesBetween(blat, blng, dlat, dlng);
 
-        // --- Implied ground speed (mph) ---
         const mphA = showA > 0 ? Math.round((distA / showA) * 60) : 0;
         const mphB = showB > 0 ? Math.round((distB / showB) * 60) : 0;
 
-        // Update card text (show "Landed" only when truly landed)
         if (S.chosen) {
           const landedA_and = (tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
           const landedB_and = (tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
@@ -879,7 +781,6 @@ function startRaceAnimation(){
             : `ETA ${fmtClock(showB)} — ~${distB} mi · ~${mphB} mph`;
         }
 
-        // Stabilized leader based on displayed remaining
         const rawLeader = showA < showB ? 'A' : 'B';
         const HYSTERESIS_MS = 2000;
         if (S._stableLeader == null) {
@@ -906,11 +807,8 @@ function startRaceAnimation(){
 
         S._lastBannerUpdate = now;
 
-        // Landing detection: ONLY when interpolation finished AND within threshold
-        const { rem: remSegA2, t: tA2 } = segRemaining('A', now);
-        const { rem: remSegB2, t: tB2 } = segRemaining('B', now);
-        const landedA = (remSegA2 <= 0.01 || tA2 >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
-        const landedB = (remSegB2 <= 0.01 || tB2 >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
+        const landedA = (remSegA <= 0.01 || tA >= 0.999) && (distA <= LANDING_MI_THRESHOLD);
+        const landedB = (remSegB <= 0.01 || tB >= 0.999) && (distB <= LANDING_MI_THRESHOLD);
 
         if (!S._landed.A && landedA) {
           S._landed.A = true;
@@ -937,7 +835,6 @@ function startRaceAnimation(){
           if (S.pickedBy.B) showBubble(S.pickedBy.B, "Landed!", 1500);
         }
 
-        // Finish only when someone truly landed
         if (landedA || landedB) {
           if (S._liveTimeoutId) { clearTimeout(S._liveTimeoutId); S._liveTimeoutId = null; }
           if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
@@ -996,26 +893,43 @@ function ensureMap(which){
   if(S.maps[which]) return S.maps[which];
   const el = which==='A' ? mapA : mapB;
   try{
-    const m = L.map(el, { zoomControl:false, attributionControl:false });
+    const m = L.map(el, { zoomControl:true, attributionControl:false });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 15 }).addTo(m);
 
     const dstDot = L.circleMarker([0,0], { radius:5, color:'#111827', fillColor:'#111827', fillOpacity:1 }).addTo(m);
     const pathLine = L.polyline([], { color:'#0ea5e9', weight:3, opacity:.9 }).addTo(m);
-
-    // Airplane marker (divIcon with inner rotator)
     const plane = L.marker([0,0], { icon: planeDivIcon(0), interactive:false }).addTo(m);
 
     const group = L.featureGroup([plane, dstDot, pathLine]).addTo(m);
     S.maps[which] = { map:m, plane, dest: dstDot, line: pathLine, group, _rotEl: null };
 
-    // cache rotator element after the marker is in DOM
+    // user interaction locks auto-fit
+    const lock = ()=>{ S._allowAutoFit[which] = false; };
+    m.on('zoomstart', lock);
+    m.on('movestart', lock);
+
+    // cache rotator after DOM attach
     setTimeout(()=>{ S.maps[which]._rotEl = plane.getElement()?.querySelector('.plane-rot'); }, 0);
+
+    // re-center button
+    const btn = document.createElement('button');
+    btn.textContent = '↺';
+    btn.title = 'Recenter';
+    btn.style.cssText = `position:absolute;top:8px;left:8px;z-index:500;border:0;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.15);padding:4px 8px;font-weight:900;cursor:pointer;`;
+    el.style.position = 'relative';
+    el.appendChild(btn);
+    btn.addEventListener('click', ()=>{
+      S._allowAutoFit[which] = true;
+      // force a fit on next render
+      if (S.dealt) { fitAndRender(which, S.dealt[which], S.destPos, { forceFit:true }); }
+    });
 
     return S.maps[which];
   }catch(e){ console.error("[DL] Map init failed:", e); return null; }
 }
 
-function fitAndRender(which, flight, destPos){
+function fitAndRender(which, flight, destPos, opts={}){
+  const { forceFit=false } = opts;
   const M = ensureMap(which); if(!M) return 1;
   let pos;
   if(flight.pos?.lat != null && (flight.pos.lng ?? flight.pos.lon) != null){ 
@@ -1040,8 +954,11 @@ function fitAndRender(which, flight, destPos){
   M.line.setLatLngs([pos, dst]);
   rotatePlane(which, bearingDeg(pos, dst));
 
-  const bounds = L.latLngBounds([pos, dst]).pad(0.35);
-  M.map.fitBounds(bounds, { animate:false });
+  // Only fit when allowed (first deal) or when forced by user
+  if (S._allowAutoFit[which] || forceFit){
+    const bounds = L.latLngBounds([pos, dst]).pad(0.35);
+    M.map.fitBounds(bounds, { animate:false });
+  }
 
   const distKm = L.latLng(pos[0],pos[1]).distanceTo(L.latLng(dst[0],dst[1]))/1000;
   return kmToMi(distKm);
@@ -1080,7 +997,6 @@ async function findAirportAndFlights(){
     setLog(`Scanning ${iata} for two live arrivals… (${i+1}/${candidates.length})`);
     try{
       const data = await liveFlights(iata);
-      // refuse any simulated response defensively
       const looksSim = data?.A?.icao24?.startsWith?.('sim') || data?.B?.icao24?.startsWith?.('sim') || data?.simulated;
       if (!looksSim && data?.A && data?.B){
         return { airport: iata, data };
@@ -1115,8 +1031,9 @@ function updateHUD(){
   else if(S.bank.C >= 5000 && S.bank.K <= -5000) setLog(` ${nameOf('C').toUpperCase()} WINS THE GAME! +$5,000 vs -$5,000!`);
 }
 
-function renderDealt(){
-  const {A,B} = S.dealt;
+function renderDealt(noFit=false){
+  const {A,B} = S.dealt || {};
+  if (!A || !B) return;
   const originA = A.origin && A.origin !== "—" ? A.origin : "???";
   const originB = B.origin && B.origin !== "—" ? B.origin : "???";
   lineA.textContent = `A — ${originA} → ${A.dest} (${A.callsign || A.icao24 || "—"})`;
@@ -1142,14 +1059,19 @@ function renderDealt(){
     cardB.appendChild(badge);
   }
 
-  try{ const miA = fitAndRender('A', A, S.destPos); etaA.dataset.mi = miA; }catch(e){ console.warn("[DL] Map A render error:", e); }
-  try{ const miB = fitAndRender('B', B, S.destPos); etaB.dataset.mi = miB; }catch(e){ console.warn("[DL] Map B render error:", e); }
+  try{ 
+    const miA = fitAndRender('A', A, S.destPos, { forceFit: !noFit && S._allowAutoFit.A }); 
+    etaA.dataset.mi = miA; 
+  }catch(e){ console.warn("[DL] Map A render error:", e); }
+  try{ 
+    const miB = fitAndRender('B', B, S.destPos, { forceFit: !noFit && S._allowAutoFit.B }); 
+    etaB.dataset.mi = miB; 
+  }catch(e){ console.warn("[DL] Map B render error:", e); }
 
   if (!S.chosen) {
     etaA.textContent = "ETA — (hidden until pick)";
     etaB.textContent = "ETA — (hidden until pick)";
   } else {
-    // show mph pre-race (after pick) using current distance / minutes
     const miA = Number(etaA.dataset.mi || 0);
     const miB = Number(etaB.dataset.mi || 0);
     const mphA = A.etaMinutes > 0 ? Math.round((miA / A.etaMinutes) * 60) : 0;
@@ -1191,7 +1113,6 @@ async function deal(){
   S.airport = pickedAirport;
   S.destPos = data.destPos || AIRPORTS[pickedAirport] || null;
 
-  // Strictly live
   const looksSim = data?.A?.icao24?.startsWith?.('sim') || data?.B?.icao24?.startsWith?.('sim') || data?.simulated;
   if (looksSim) { showError("Only live flights allowed; retrying another airport."); return; }
 
@@ -1201,6 +1122,9 @@ async function deal(){
   S.roundSeed = Math.floor(Math.random()*1e9);
   S.pickedBy = {A:null, B:null};
   S.odds = null;
+
+  // allow auto-fit until user interacts in this round
+  S._allowAutoFit = { A:true, B:true };
 
   S.etaBaseline = {A:null, B:null};
   S.etaBaselineTime = null;
@@ -1300,7 +1224,6 @@ async function resolve(){
   const baseTime = S.etaBaselineTime || S.raceStartTime || now;
   const elapsedMinSinceBase = Math.max(0, (now - baseTime) / 60000);
 
-  // Prefer physical landing status to decide winner
   const aLanded = !!S._landed.A;
   const bLanded = !!S._landed.B;
 
@@ -1308,7 +1231,6 @@ async function resolve(){
   if (aLanded && !bLanded) winner = 'A';
   else if (bLanded && !aLanded) winner = 'B';
   else {
-    // Fall back to displayed remaining
     const remA = Math.max(0, (S.etaBaseline.A ?? 0) - elapsedMinSinceBase);
     const remB = Math.max(0, (S.etaBaseline.B ?? 0) - elapsedMinSinceBase);
     winner = remA <= remB ? 'A' : 'B';
@@ -1335,7 +1257,6 @@ async function resolve(){
   const bonusText  = isLongshotWin ? ` (longshot ×${(S.odds.mult||1).toFixed(2)})` : "";
   setLog(`Flight ${winner} wins! ${winnerName} takes ${payout}${bonusText} from ${loserName}.`);
 
-  // WINNER Kapow
   showKapow("WINNER!", {
     subtitle: `${winnerName} +${fmtUSD(payout)}${isLongshotWin ? " · Longshot!" : ""}`,
     palette: ["#2563EB","#FBBF24","#EF4444","#22C55E"]
@@ -1363,7 +1284,6 @@ async function resolve(){
   if (S._liveIntervalId) { clearInterval(S._liveIntervalId); S._liveIntervalId = null; }
   S._animationRunning = false;
 
-  // CHAMPION Kapow (match victory)
   const kChampion = S.bank.K >= 5000 && S.bank.C <= -5000;
   const cChampion = S.bank.C >= 5000 && S.bank.K <= -5000;
   if (kChampion || cChampion){
@@ -1389,7 +1309,6 @@ async function resolve(){
 }
 
 /* =================== OPTIONAL: Manual seat claim buttons =================== */
-// runtime-created UI: only shown when seat === "Solo"
 let _seatUI = { box:null, cajunBtn:null, kessBtn:null };
 function ensureSeatButtons(){
   if (_seatUI.box) return _seatUI;
@@ -1427,16 +1346,15 @@ function refreshSeatButtons(){
   const ui = ensureSeatButtons();
   ui.box.style.display = (seat === "Solo") ? "flex" : "none";
 }
-function updateSeatButtonsDisable(seats, presence){
+function updateSeatButtonsDisable(seats){
   const ui = ensureSeatButtons();
   if (seat !== "Solo"){ ui.box.style.display = "none"; return; }
-  const now = Date.now();
-  const kFreshTaken = isValidPlayerId(seats.K) && !isSeatStale(seats, presence, 'K', now);
-  const cFreshTaken = isValidPlayerId(seats.C) && !isSeatStale(seats, presence, 'C', now);
-  ui.cajunBtn.disabled = !!kFreshTaken;
-  ui.kessBtn.disabled  = !!cFreshTaken;
-  ui.cajunBtn.style.opacity = kFreshTaken ? "0.5" : "1";
-  ui.kessBtn.style.opacity  = cFreshTaken ? "0.5" : "1";
+  const kTaken = isValidPlayerId(seats.K);
+  const cTaken = isValidPlayerId(seats.C);
+  ui.cajunBtn.disabled = !!kTaken;
+  ui.kessBtn.disabled  = !!cTaken;
+  ui.cajunBtn.style.opacity = kTaken ? "0.5" : "1";
+  ui.kessBtn.style.opacity  = cTaken ? "0.5" : "1";
 }
 async function claimSeat(wantSeat) {
   if (!roomRef) return;
@@ -1446,190 +1364,31 @@ async function claimSeat(wantSeat) {
       const dSnap = await tx.get(roomRef);
       const d = dSnap.data() || {};
       const seats = {...(d.seats || { K:"", C:"" })};
-      const presence = d.presence || {K:null, C:null};
       const other = wantSeat === "K" ? "C" : "K";
-      const now = Date.now();
 
-      // already mine?
       if (seats[wantSeat] === myId) return wantSeat;
 
-      // target seat free/STALE? take it; and release my other if I had it
-      const targetStale = isSeatStale(seats, presence, wantSeat, now);
-      if (targetStale) {
+      if (!isValidPlayerId(seats[wantSeat])) {
         if (seats[other] === myId) seats[other] = "";
         seats[wantSeat] = myId;
-        const updates = { seats };
-        updates[`presence.${wantSeat}`] = { pid: myId, last: now };
-        tx.update(roomRef, updates);
+        tx.update(roomRef, { seats });
         return wantSeat;
       }
-      return "Solo"; // taken by a fresh occupant
+      return "Solo";
     });
 
     if (result === "K" || result === "C") {
       seat = result;
       setSeatLabel(seat);
       refreshSeatButtons();
-      startPresenceHeartbeat();
       toast(`You are now ${nameOf(seat)}!`);
+      startPresenceHeartbeat();
     } else {
       toast("That seat is taken.");
     }
   } catch (e) {
     console.error("[DL] Seat claim failed:", e);
     showError("Seat claim failed.");
-  }
-}
-
-/* =================== UX: Two-players joined indicator =================== */
-let _joinUI = null;
-function ensureJoinStatusUI(){
-  if (_joinUI) return _joinUI;
-  const el = document.createElement('div');
-  el.id = 'joinStatus';
-  el.style.cssText = `
-    position: fixed; top: 12px; left: 12px; z-index: 1000;
-    display: inline-flex; gap: 8px; align-items: center;
-    padding: 6px 10px; border-radius: 999px; font-weight: 700;
-    background: rgba(255,255,255,0.9); box-shadow: 0 2px 8px rgba(0,0,0,.08);
-  `;
-  el.innerHTML = `
-    <span id="joinDot" style="width:10px;height:10px;border-radius:50%;background:#f59e0b;display:inline-block"></span>
-    <span id="joinText">Waiting for players…</span>
-  `;
-  document.body.appendChild(el);
-  _joinUI = { root: el, dot: el.querySelector('#joinDot'), text: el.querySelector('#joinText') };
-  return _joinUI;
-}
-function updateJoinStatus(seats, presence){
-  const ui = ensureJoinStatusUI();
-  const now = Date.now();
-
-  const staleK = isSeatStale(seats, presence, 'K', now);
-  const staleC = isSeatStale(seats, presence, 'C', now);
-
-  const freshK = isValidPlayerId(seats?.K) && !staleK;
-  const freshC = isValidPlayerId(seats?.C) && !staleC;
-  const both = freshK && freshC;
-
-  ui.dot.style.background = both ? '#22c55e' : '#f59e0b';
-  ui.text.textContent = both
-    ? 'Both players ready'
-    : (freshK || freshC ? 'Waiting for second player…' : 'Waiting for players…');
-
-  return both;
-}
-
-/* =================== Simple in-room chat =================== */
-let _chat = null;
-function ensureChatUI(){
-  if (_chat) return _chat;
-  const box = document.createElement('div');
-  box.id = 'chat';
-  box.style.cssText = `
-    position: fixed; right: 14px; bottom: 14px; z-index: 1000; width: 320px;
-    background: rgba(255,255,255,0.95); border-radius: 12px; box-shadow: 0 6px 18px rgba(0,0,0,.12);
-    display: none; flex-direction: column; overflow: hidden;`;
-  box.innerHTML = `
-    <div style="padding:8px 10px;font-weight:800;border-bottom:1px solid #eee;display:flex;align-items:center;gap:8px">
-      <span>Chat</span>
-      <span id="chatUnreadDot" style="display:none;width:8px;height:8px;border-radius:50%;background:#ef4444;margin-left:auto"></span>
-    </div>
-    <div id="chatList" style="padding:8px 10px; height: 180px; overflow-y: auto; display:flex; flex-direction:column; gap:6px;"></div>
-    <div style="display:flex; gap:6px; padding:8px 10px; border-top:1px solid #eee">
-      <input id="chatInput" type="text" placeholder="Type a message…" style="flex:1; padding:8px 10px; border-radius:8px; border:1px solid #ddd;"/>
-      <button id="chatSend" style="padding:8px 12px; border:0; border-radius:8px; font-weight:700; cursor:pointer;">Send</button>
-    </div>`;
-  document.body.appendChild(box);
-  const list = box.querySelector('#chatList');
-  const input = box.querySelector('#chatInput');
-  const sendBtn = box.querySelector('#chatSend');
-  const unreadDot = box.querySelector('#chatUnreadDot');
-
-  function sendNow(){
-    const t = input.value.trim();
-    if (t){ sendChat(t); input.value=''; hideUnread(); }
-  }
-  sendBtn.addEventListener('click', sendNow);
-  input.addEventListener('keydown', (e)=>{
-    if (e.key === 'Enter'){
-      e.preventDefault();
-      sendNow();
-    }
-  });
-
-  function hideUnread(){ _chatUnread = 0; unreadDot.style.display='none'; _lastChatSeenT = Date.now(); }
-  function maybeUnreadBurst(latestMessage){
-    const me = getPlayerId();
-    // unread if: message not mine, and tab hidden or not focused
-    if (latestMessage && latestMessage.pid !== me && (document.hidden || !document.hasFocus())){
-      _chatUnread++;
-      unreadDot.style.display = 'inline-block';
-    }
-  }
-
-  window.addEventListener('visibilitychange', ()=>{
-    if (!document.hidden) hideUnread();
-  });
-  window.addEventListener('focus', hideUnread);
-
-  _chat = { box, list, input, sendBtn, unreadDot, hideUnread, maybeUnreadBurst };
-  return _chat;
-}
-function updateChatVisibility(show){
-  const ui = ensureChatUI();
-  ui.box.style.display = show ? 'flex' : 'none';
-}
-function renderChat(messages){
-  const ui = ensureChatUI();
-  if (!Array.isArray(messages)) messages = [];
-  ui.list.innerHTML = '';
-  const me = getPlayerId();
-  let lastMsg = null;
-
-  messages.forEach(m=>{
-    lastMsg = m;
-    const row = document.createElement('div');
-    row.style.cssText = `display:flex;`;
-    const bubble = document.createElement('div');
-    const mine = m.pid === me;
-    bubble.style.cssText = `
-      max-width: 70%; padding:6px 10px; border-radius:12px;
-      ${mine ? 'margin-left:auto;background:#DCFCE7;' : 'margin-right:auto;background:#E5E7EB;'}
-      font-size:14px; line-height:1.2;`;
-    const label = document.createElement('div');
-    label.style.cssText = 'font-size:11px; opacity:.7; margin-bottom:2px;';
-    const when = new Date(m.t||Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    label.textContent = `${nameOf(m.seat||'')} • ${when}`;
-    const text = document.createElement('div');
-    text.textContent = m.text || '';
-    bubble.appendChild(label);
-    bubble.appendChild(text);
-    row.appendChild(bubble);
-    ui.list.appendChild(row);
-  });
-  ui.list.scrollTop = ui.list.scrollHeight;
-
-  // unread indicator if new message arrived while hidden/not focused
-  if (messages.length){
-    ui.maybeUnreadBurst(lastMsg);
-  }
-}
-async function sendChat(text){
-  if (!roomRef) return;
-  const myId = getPlayerId();
-  const mySeat = seat;
-  const clean = text.slice(0, 500); // soft limit
-  try{
-    await window.firebaseRunTransaction(db, async (tx)=>{
-      const snap = await tx.get(roomRef);
-      const d = snap.data() || {};
-      let messages = Array.isArray(d.messages) ? d.messages.slice(-49) : [];
-      messages.push({ t: Date.now(), pid: myId, seat: (mySeat==='K'||mySeat==='C') ? mySeat : null, text: clean });
-      tx.update(roomRef, { messages });
-    });
-  }catch(e){
-    console.warn("[DL] sendChat failed:", e);
   }
 }
 
@@ -1654,19 +1413,216 @@ resetBtn.addEventListener("click", async ()=>{
 newRoomBtn.addEventListener("click", createRoom);
 copyBtn.addEventListener("click", copyInvite);
 
-window.addEventListener('beforeunload', ()=>{ stopPresenceHeartbeat(); });
+/* =================== Room lifecycle =================== */
+async function ensureRoom(){
+  if(!db){ const ok = await initFirebase(); if(!ok) return null; }
+
+  const url = new URL(location.href);
+  roomId = url.searchParams.get("room");
+  if(!roomId) return null;
+
+  roomRef = window.firebaseDoc(db, "rooms", roomId);
+
+  const myId = getPlayerId();
+  const seatHint = getSeatHint();
+
+  // Get or create
+  let snap;
+  try{ snap = await window.firebaseGetDoc(roomRef); } 
+  catch(e){ console.error("[DL] room get failed:", e); showError("Failed to get room."); return null; }
+
+  if(!snap || !snap.exists()){
+    try{
+      await window.firebaseSetDoc(roomRef, {
+        createdAt: Date.now(),
+        seats: {K:"", C:""},
+        bank: {K:0, C:0},
+        airport:"JFK", bet:50, live:true,
+        dealt:null, destPos:null,
+        racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
+        pickedBy: {A:null, B:null},
+        odds: null,
+        presence: {}
+      });
+    }catch(e){ console.error("[DL] room create failed:", e); showError("Failed to create room."); return null; }
+  }
+
+  // Claim a seat if possible
+  try{
+    const claim = await window.firebaseRunTransaction(db, async (tx)=>{
+      const dSnap = await tx.get(roomRef);
+      const d = dSnap.data() || {};
+      const seats = { ...(d.seats || {K:"", C:""}) };
+
+      if (seats.K === myId) return "K";
+      if (seats.C === myId) return "C";
+
+      const Kfree = !isValidPlayerId(seats.K);
+      const Cfree = !isValidPlayerId(seats.C);
+      let pick = "Solo";
+
+      if (Kfree && Cfree){
+        const pref = (seatHint === "K" || seatHint === "C") ? seatHint : "K";
+        seats[pref] = myId;
+        tx.update(roomRef, { seats });
+        pick = pref;
+      }else if (Kfree){
+        seats.K = myId; tx.update(roomRef, { seats }); pick = "K";
+      }else if (Cfree){
+        seats.C = myId; tx.update(roomRef, { seats }); pick = "C";
+      }else{
+        pick = "Solo";
+      }
+      return pick;
+    });
+    seat = claim; 
+    setSeatLabel(seat); 
+    seatPill.title = `Room: ${roomId}`;
+    refreshSeatButtons();
+    if (seat === "K" || seat === "C") startPresenceHeartbeat();
+  }catch(e){ console.error("[DL] seat claim failed:", e); showError("Failed to claim seat."); }
+
+  // Live listener
+  if (unsubRoom) unsubRoom();
+  unsubRoom = window.firebaseOnSnapshot(roomRef, (doc)=>{
+    const D = doc.data(); if(!D) return;
+
+    // If we lost our seat
+    const myIdNow = getPlayerId();
+    if (seat !== "Solo") {
+      if (seat === "K" && D.seats?.K !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
+      if (seat === "C" && D.seats?.C !== myIdNow){ seat = "Solo"; setSeatLabel(seat); stopPresenceHeartbeat(); }
+    }
+    updateSeatButtonsDisable(D.seats || {K:"", C:""});
+
+    // >>> Ready pill update (compact, non-crowding)
+    const both = updateReadyPill(D.seats || {K:"",C:""}, D.presence || {});
+    // Chat visibility + header hint
+    updateChatVisibility(both, D.seats || {K:"", C:""});
+    const chatStatus = document.getElementById('chatStatus');
+    if (chatStatus){
+      const now = Date.now();
+      const staleK = isSeatStale(D.seats, D.presence, 'K', now);
+      const staleC = isSeatStale(D.seats, D.presence, 'C', now);
+      chatStatus.textContent = both ? "Ready" : staleK && staleC ? "Both away" : staleK ? "Cajun away" : "Kessler away";
+      chatStatus.style.color = both ? "#16a34a" : "#f59e0b";
+    }
+
+    // Merge room state
+    const wasRacing = S.racing;
+    const oldChosen = S.chosen;
+    const oldRaceStartTime = S.raceStartTime;
+
+    S.bank = {...D.bank};
+    S.airport = D.airport;
+    S.bet = D.bet;
+    S.live = true;
+    S.dealt = D.dealt ? {...D.dealt} : null;
+    S.destPos = D.destPos || null;
+    S.racing = D.racing;
+    S.turn = D.turn;
+    S.chosen = D.chosen;
+    S.roundSeed = D.roundSeed;
+    S.lastWinner = D.lastWinner;
+    S.raceStartTime = D.raceStartTime || null;
+    S.pickedBy = D.pickedBy || {A:null, B:null};
+    S.odds = D.odds || null;
+
+    // Chat render
+    if (Array.isArray(D.chat)) {
+      renderChat(D.chat);
+    }
+
+    updateHUD();
+    if(S.dealt) renderDealt(/*noFit*/ true);
+
+    const raceJustStarted = S.racing && (!wasRacing || S.raceStartTime !== oldRaceStartTime);
+    const choiceChanged = S.racing && S.chosen !== oldChosen;
+    
+    if(raceJustStarted || choiceChanged){
+      S.etaBaseline = { A: S.dealt?.A?.etaMinutes ?? 0, B: S.dealt?.B?.etaMinutes ?? 0 };
+      S.etaBaselineTime = S.raceStartTime || Date.now();
+      S._stableLeader = null; 
+      S._leaderLockUntil = 0; 
+      S._lastBannerUpdate = 0;
+      S._landed = {A:false, B:false};
+      S._animationRunning = false;
+
+      ['A','B'].forEach(k=>{
+        const f = S.dealt[k];
+        if(f){
+          let startPos;
+          if (f?.pos?.lat != null && (f.pos.lng ?? f.pos.lon) != null){
+            startPos = [f.pos.lat, (f.pos.lng ?? f.pos.lon)];
+          } else {
+            startPos = guessPos(f);
+          }
+          anchorSegment(k, startPos, f.etaMinutes, S.raceStartTime || Date.now());
+        }
+      });
+      
+      const turnPlayer = nameOf(S.turn);
+      const oppPlayer  = nameOf(S.turn === "K" ? "C" : "K");
+      const oppChoice = S.chosen === 'A' ? 'B' : 'A';
+      setLog(`${turnPlayer} picked Flight ${S.chosen}! ${oppPlayer} gets Flight ${oppChoice}. Racing for $${S.bet}${S.odds && S.odds[S.odds.long] ? ` (longshot pays ${S.odds.mult.toFixed(2)}×)` : ""}!`);
+      startRaceAnimation();
+    }else if(S.racing && wasRacing){
+      if(!S._animationRunning) startRaceAnimation();
+    }else if(S.dealt && !S.racing){
+      if(S.turn === seat) setLog("Your turn! Pick flight A or B. Your opponent gets the other one.");
+      else setLog(`Waiting for ${nameOf(S.turn)} to pick a flight...`);
+    }else{
+      setLog("Deal flights to start.");
+    }
+
+    refreshSeatButtons();
+  }, (err)=>{ console.error("[DL] room snapshot error:", err); showError("Lost connection. Reload the page."); });
+
+  return roomRef;
+}
+
+async function createRoom(){
+  if(!db){ const ok = await initFirebase(); if(!ok){ alert("Cannot create room."); return; } }
+  try{
+    const id = randomCode(6);
+    const newRoomRef = window.firebaseDoc(db, "rooms", id);
+    await window.firebaseSetDoc(newRoomRef, {
+      createdAt: Date.now(),
+      seats: {K:"", C:""},
+      bank: {K:0, C:0},
+      airport:"JFK", bet:50, live:true,
+      dealt:null, destPos:null,
+      racing:false, turn:"K", chosen:null, roundSeed:null, lastWinner:null,
+      pickedBy: {A:null, B:null},
+      odds: null,
+      presence: {},
+      chat: []
+    });
+    const u = new URL(currentUrlWithRoom(id));
+    u.searchParams.set("seat","K");
+    history.replaceState(null, "", u.toString());
+    toast(`Room created: ${id}`);
+    await ensureRoom();
+  }catch(e){ console.error("[DL] createRoom error:", e); showError("Failed to create room."); }
+}
+
+async function copyInvite(){
+  if(!roomId) await createRoom();
+  if(!roomId) return;
+  const invite = buildInviteUrl(roomId);
+  try{ await navigator.clipboard.writeText(invite); toast("Invite link copied!"); }
+  catch(e){ console.error("[DL] clipboard error:", e); prompt("Copy this link:", invite); }
+}
 
 /* =================== Init =================== */
 (async function init(){
   setSeatLabel(seat);
   updateHUD();
   startBlinking();
-  ensureSeatButtons(); // create once
-  refreshSeatButtons(); // initial state
-  ensureJoinStatusUI(); // create status pill
-  ensureChatUI();       // create chat box (hidden until both ready)
+  ensureReadyPill();
+  ensureChatUI(); // create once (hidden until needed)
 
-  // Load sofa art if present
+  // Sofa art if present
   const img = new Image();
   img.onload = function() {
     const stage = byId("stage");
@@ -1683,6 +1639,9 @@ window.addEventListener('beforeunload', ()=>{ stopPresenceHeartbeat(); });
   };
   img.onerror = function() { console.warn("[DL] Could not load sofa image, using placeholder"); };
   img.src = "./sofawithkesslerandcajun.png";
+
+  ensureSeatButtons();
+  refreshSeatButtons();
 
   await initFirebase();
   await ensureRoom();
