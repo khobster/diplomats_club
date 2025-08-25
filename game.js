@@ -664,7 +664,7 @@ async function updateLivePositions() {
       
     } catch(e) {
       attempts++;
-      console.warn(`[DL] Live update attempt ${attempts} failed:`, e.message || e);
+      console.warn(`[DL] Live update attempt ${attempts} failed`, e.message || e);
       if (attempts >= maxAttempts) {
         console.warn("[DL] All live update attempts failed, continuing with interpolation");
         updateConnectionStatus(false);
@@ -1553,6 +1553,8 @@ async function ensureRoom(){
     const wasRacing = S.racing;
     const oldChosen = S.chosen;
     const oldRaceStartTime = S.raceStartTime;
+    const prevRoundSeed = S.roundSeed;      // <-- capture previous round
+    const prevAirport   = S.airport;        // <-- capture previous airport
 
     S.bank = {...D.bank};
     S.airport = D.airport;
@@ -1575,7 +1577,18 @@ async function ensureRoom(){
     }
 
     updateHUD();
-    if(S.dealt) renderDealt(/*noFit*/ true);
+
+    // One-time fit on *new round* for ALL clients
+    if (S.dealt) {
+      const roundChanged = (D.roundSeed && D.roundSeed !== prevRoundSeed) ||
+                           (D.airport && D.airport !== prevAirport);
+      if (roundChanged) {
+        S._allowAutoFit = { A:true, B:true };   // unlock just for this render
+        renderDealt(/* noFit = */ false);       // perform a one-time fit
+      } else {
+        renderDealt(/* noFit = */ true);        // preserve user's current zoom
+      }
+    }
 
     const raceJustStarted = S.racing && (!wasRacing || S.raceStartTime !== oldRaceStartTime);
     const choiceChanged = S.racing && S.chosen !== oldChosen;
